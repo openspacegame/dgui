@@ -1,129 +1,279 @@
 # dgui
 
-A small Rust GUI prototype for applications that rebuild their UI every render cycle, such as games. **Every element is a `Frame`**. Containers, text, buttons, editors, and custom graphics share the same styling and event methods. Components are ordinary Rust functions returning frames.
+**Flexbox layout for egui, without giving up immediate mode.**
 
-```sh
-cargo run --example demo
-```
-
-The native eframe demo includes a counter, editable crew cards, reordering and unmounting controls, wrapping text, and a clickable animated canvas. Resizing wraps the cards. Their names and scores follow their keys; removing and recreating a card resets its state.
-
-## One element type
+dgui lets you lay out egui apps the way you'd lay out a web page: rows and
+columns, `gap`, `padding`, `justify`, `align`, `grow`, `wrap`, percentages. You
+still rebuild the whole UI from plain Rust every frame, borrow your data
+directly, and use egui's widgets, text and painter wherever you want.
 
 ```rust
-use dgui::{button, text_input, Color, Frame, State};
+use dgui::{Align, Color, Direction, Frame, Justify, Length, Ui, button, text_input};
 
-fn form<'a>(name: State<String>, save: impl FnOnce() + 'a) -> Frame<'a> {
+fn sign_in<'a>(ui: &mut Ui<'_, 'a>) -> Frame<'a> {
+    let name = ui.state("name", || String::from("Ada"));
+
+    // Fill the window and center the dialog on both axes.
     Frame::new()
-        .padding(16.0)
-        .margin(8.0)
-        .gap(12.0)
-        .background(Color::rgb(25, 35, 50))
-        .border(1.0, Color::rgb(70, 90, 120))
+        .width(Length::Percent(1.0))
+        .height(Length::Percent(1.0))
+        .align(Align::Center)
+        .justify(Justify::Center)
         .children(move |ui| {
-            ui.add(Frame::text("Pilot name"));
-            ui.add(text_input(name).padding(10.0).margin(4.0));
-            ui.add(button("Save").padding(12.0).on_click(save));
+            ui.add(
+                Frame::new()
+                    .width(360.0)
+                    .max_width(Length::Percent(0.9))
+                    .padding(24.0)
+                    .gap(16.0)
+                    .background(Color::rgb(28, 38, 55))
+                    .corner_radius(12)
+                    .children(move |ui| {
+                        // Title on the left, close button pinned to the right.
+                        ui.add(
+                            Frame::new()
+                                .direction(Direction::Row)
+                                .justify(Justify::SpaceBetween)
+                                .align(Align::Center)
+                                .children(|ui| {
+                                    ui.add(Frame::text("Sign in"));
+                                    ui.add(button("×"));
+                                }),
+                        );
+                        ui.add(text_input(name));
+                        // Actions hug the right edge, whatever their labels say.
+                        ui.add(
+                            Frame::new()
+                                .direction(Direction::Row)
+                                .justify(Justify::End)
+                                .gap(8.0)
+                                .children(move |ui| {
+                                    ui.add(button("Cancel"));
+                                    ui.add(
+                                        button(format!("Continue as {}", name.get()))
+                                            .on_click(move || println!("hello, {}", name.get())),
+                                    );
+                                }),
+                        );
+                    }),
+            );
         })
 }
 ```
 
-`ui.add` accepts a `Frame`. `ui.frame(style, children)` is shorthand for creating and adding a container. Its child closure executes immediately. A `Frame::new().children(...)` closure executes when the frame is added, before layout.
+<p align="center">
+  <img src="screenshots/sign-in.png" width="560" alt="A sign-in dialog centered in the window, with a close button in the top-right corner and Cancel / Continue as Ada buttons aligned to the right">
+</p>
 
-Constructors all return the same type:
+If you've written CSS, you can read that without the docs. Doing the same in
+plain egui (centering a box of unknown size, right-aligning a button whose
+label changes as you type) usually means measuring last frame's sizes or
+running a hidden sizing pass.
 
-- `Frame::new()` creates an empty container.
-- `Frame::text(text)` creates wrapping text content.
-- `Frame::canvas(measure, draw)` creates measured custom content.
-- `Frame::egui_canvas(size, draw)` creates a canvas with a fixed preferred size.
-- `button(text)` creates a focusable frame containing centered text, with default colors and padding.
-- `text_input(state)` creates a frame containing native single-line editing behavior.
+```sh
+cargo run --example sign_in   # the dialog above
+cargo run --example demo      # wrapping cards, keyed state, a canvas
+```
 
-There is no `Widget` trait or separate button/editor/canvas element type. These constructors can be used in the same `Vec<Frame<'_>>`, styled with a shared function, and composed with the same methods. `children(...)` replaces existing content, including a button's default label or a canvas; put text and canvas frames among the children to combine them.
+## Why this is nice
 
-## Shared styling and interaction
+### Real layout, still immediate mode
 
-Every frame supports direction, flex wrapping, gap, padding, margin, width/height, min/max dimensions, grow/shrink, alignment, justification, backgrounds, borders, and corner radius directly. `Style` provides the same properties for reusable styles; `.style(style)` replaces the whole style, while individual setters change just one property.
+egui lays out each widget as it draws it, in a single pass. That's what makes
+it so simple, and it's also why "center this", "push that to the right" and
+"wrap these cards onto the next line" are hard: when a widget is placed, its
+later siblings haven't been measured yet.
 
-All lengths are logical pixels. Dimension setters accept pixel numbers or `Length::Percent(1.0)` for 100%. Sizes include padding and border, and exclude margin. Padding, margin, and border width are currently uniform on all sides. Flex margins do not collapse. Margin lies outside painting and interaction. Frames clip rectangular overflow to themselves and their ancestors; corner radius rounds decorations but does not create a rounded clipping mask. There is no scrolling yet.
+dgui splits each render cycle into three steps:
 
-All frames also support:
+1. **Build**: your code runs and produces a tree of frames.
+2. **Lay out**: [Taffy](https://github.com/DioxusLabs/taffy), the flexbox
+   engine behind Bevy UI and Dioxus, sizes everything, measuring text and
+   custom content as it goes.
+3. **Draw**: frames are painted and made interactive through ordinary egui.
 
-- `.on_click(...)`: deferred pointer activation. Nested targets receive clicks without bubbling to ancestors. Clicking a noninteractive text child still activates its interactive parent.
-- `.on_hover(...)`: a deferred callback each render cycle while hovered.
-- `.on_focus(...)` and `.on_blur(...)`: focus transition callbacks.
-- `.focusable(true)`: tab focus and Enter/Space activation for a frame. Buttons enable this by default. Plain clickable frames do not become keyboard targets automatically.
-- `.clickable(true)`: reserve a pointer target even without a handler, as used for editor padding.
-- `.hover_background(...)`, `.active_background(...)`, and `.focus_background(...)`: common state-dependent decorations.
+The tree is thrown away afterwards. Nothing is retained or diffed, and there
+are no signals or subscriptions to manage. It still feels like egui, but every
+frame knows its final size before anything is drawn. The result is ready in
+the same egui pass, with no "wrong for one frame" flicker.
 
-Handlers run after the complete tree is drawn. An `on_click` setter replaces the previous handler. Callbacks may borrow data for the current render cycle; copied `State<T>` handles are convenient for sharing mutable application state.
+### The CSS you already know
 
-Text inputs have specialized caret, selection, and keyboard behavior inside their common frame. Their generic click handlers also observe clicks on the editor. Clicking their padding focuses the editor. Typing a space does not trigger a frame click.
+| CSS                                  | dgui                                         |
+| ------------------------------------ | -------------------------------------------- |
+| `display: flex; flex-direction: row` | `.direction(Direction::Row)` / `Style::row()` |
+| `flex-wrap: wrap`                    | `.wrap(true)`                                |
+| `gap: 12px`                          | `.gap(12.0)`                                 |
+| `padding`, `margin`                  | `.padding(16.0)`, `.margin(8.0)`             |
+| `justify-content: space-between`     | `.justify(Justify::SpaceBetween)`            |
+| `align-items: center`                | `.align(Align::Center)`                      |
+| `flex-grow: 1; flex-shrink: 0`       | `.grow(1.0).shrink(0.0)`                     |
+| `width: 100%; max-width: 250px`      | `.width(Length::Percent(1.0)).max_width(250.0)` |
+| `min-width`, `min-height`, `max-height` | `.min_width(..)`, `.min_height(..)`, `.max_height(..)` |
+| `background`, `border`, `border-radius` | `.background(..)`, `.border(1.0, ..)`, `.corner_radius(8)` |
+| `:hover`, `:active`, `:focus` backgrounds | `.hover_background(..)`, `.active_background(..)`, `.focus_background(..)` |
+| `overflow: hidden`                   | always on                                    |
 
-## Components and keyed state
-
-Keep a `Dgui` instance in the host. Configure egui for one pass, then call `show` once per render cycle in a finite host region:
+Sizes use `box-sizing: border-box`. Responsive layouts come for free. A row of
+fixed-width, growable cards wraps onto new lines as the window narrows, with
+no breakpoints or resize code:
 
 ```rust,ignore
-// Once during initialization:
-ctx.options_mut(|options| options.max_passes = 1.try_into().unwrap());
-
-// In eframe::App::ui:
-host.ctx().request_repaint();
-self.gui.show(host, |ui| {
-    ui.scope("form", |ui| {
-        let name = ui.state("name", String::new);
-        ui.add(form(name, move || println!("Save {}", name.get())));
-    });
+ui.frame(Style::row().wrap(true).gap(16.0), |ui| {
+    for crew in &crew_members {
+        ui.add(Frame::new().width(250.0).grow(1.0).padding(18.0).children(...));
+    }
 });
 ```
 
-Component functions can accept `&mut Ui<'_, 'a>` to obtain keyed state and return `Frame<'a>`. Store the result in a local before `ui.add` to avoid borrowing `ui` twice in one expression. See [`examples/demo.rs`](examples/demo.rs).
+<p align="center">
+  <img src="screenshots/demo-wide.png" height="380" alt="The demo in a wide window: two crew cards side by side">
+  &nbsp;
+  <img src="screenshots/demo-narrow.png" height="380" alt="The same demo in a narrow window: the crew cards wrap onto separate rows and text reflows">
+</p>
+<p align="center"><sub>The same code at 900px and 440px wide. The cards wrap and the text reflows.</sub></p>
 
-`ui.scope(key, children)` establishes component identity without adding a layout frame. Its identity is its parent scope plus its key. Sibling keys must be unique; use domain IDs for dynamic lists. Frames do not implicitly introduce state scopes.
+### Everything is a `Frame`
 
-`ui.state(key, initializer)` initializes once per scope. Repeated calls retrieve the same handle; changing the key's value type is an error. `State<T>` is `Copy` even when `T` is not:
+dgui has no widget trait, separate button type, or container/leaf split.
+Containers, text, buttons, text inputs and custom canvases are all the same
+type, with the same styling and event methods:
 
-- `get()` clones the value.
-- `with(|value| ...)` reads without cloning.
-- `set(value)` replaces it.
-- `update(|value| ...)` mutates in place and returns the closure's result.
+```rust,ignore
+Frame::new()                       // a container
+Frame::text("Hello")               // wrapping text
+button("Save")                     // a focusable, pre-styled frame with a label
+text_input(name)                   // a frame wrapping egui's TextEdit
+Frame::egui_canvas([200.0, 60.0], |ui| { /* any egui code */ })
+```
 
-Handles use `generational-box` with runtime borrow checks on the UI thread. Unrelated states can be accessed within an update. Conflicting borrows of the same state and access after unmount panic.
+So a button can have any layout you like. It's just a frame:
 
-A scope stays mounted while its closure appears in the build. State survives skipped state calls within a mounted scope. Missing scopes and their descendants are removed after callbacks, dropping values and invalidating handles. Reappearing scopes initialize fresh state. Root state lives until the `Dgui` instance is dropped.
+```rust,ignore
+button("")
+    .direction(Direction::Row)
+    .gap(8.0)
+    .children(|ui| {
+        ui.add(icon());
+        ui.add(Frame::text("Upload"));
+        ui.add(Frame::new().grow(1.0)); // spacer
+        ui.add(Frame::text("Ctrl+U"));
+    })
+```
 
-Interaction identity uses mount generation and declaration order within the scope. Reordering keyed scopes preserves editor focus and selection. Adding or removing earlier unkeyed frames can shift identities; put independently movable or conditional components in keyed scopes. Remounting creates fresh identity.
+Any frame can be clicked, hovered or focused. Put `.on_click(...)` on a
+card, a row, or a canvas and it becomes a hit target, with no `Sense` or
+`interact` plumbing. `.focusable(true)` makes it reachable with Tab and
+activatable with Enter/Space.
 
-## Custom canvas content
+### Components are functions, state is a `Copy` handle
 
-`Frame::canvas(measure, draw)` supplies independent measurement and drawing:
+A component is a function that returns a `Frame`. It can ask for state keyed to
+its scope, similar to React hooks but without the hook-ordering rules, since
+state is looked up by key:
 
-- `measure(&egui::Context, MeasureInput) -> [f32; 2]` receives known content dimensions and available space, including min-content and max-content requests. Return a preferred size excluding padding and border. The runtime enforces known dimensions. Measurement may execute repeatedly and must not paint, interact, or mutate application state. The context provides font measurement.
-- `draw(&mut Canvas)` executes once after all layout. `canvas.ui` is constrained and clipped to the content rectangle. `id`, `frame_rect`, and `content_rect` expose native content identity and geometry.
-- `canvas.response()` exposes the common frame interaction. Configure it through frame event methods. `canvas.frame_painter()` paints custom decorations, including padding, within ancestor clipping.
-- `canvas.defer(callback)` queues an effect after drawing.
-- `canvas.respond(response)` reports the response of a primary native control, using `canvas.id` for that control. Its interactions contribute to the enclosing frame's event handlers; padding clicks forward focus. The built-in editor uses this bridge.
+```rust,ignore
+fn counter<'a>(ui: &mut Ui<'_, 'a>) -> Frame<'a> {
+    let count = ui.state("count", || 0);
+    Frame::new()
+        .direction(Direction::Row)
+        .gap(12.0)
+        .align(Align::Center)
+        .children(move |ui| {
+            ui.add(button("−").on_click(move || count.update(|n| *n -= 1)));
+            ui.add(Frame::text(format!("Count: {}", count.get())));
+            ui.add(button("+").on_click(move || count.update(|n| *n += 1)));
+        })
+}
 
-`Frame::egui_canvas(size, draw)` is simpler: its closure receives just `&mut egui::Ui`. Raw egui controls added there keep their immediate interaction semantics. Use the measured canvas and `respond` when integrating native content with common frame handlers.
+// Each scope gets its own state:
+for id in [1, 2, 3] {
+    ui.scope(id, |ui| {
+        let frame = counter(ui);
+        ui.add(frame);
+    });
+}
+```
 
-## Render lifecycle and limits
+`State<T>` is `Copy` for any `T`, so you can move it into as many closures as
+you like without `Rc<RefCell<…>>` or cloning. State follows its key: reorder
+the list and each counter keeps its count, and a focused text field keeps its
+focus and selection. Drop a scope from the build and its state is freed. Bring
+it back and it starts fresh.
 
-1. Build the complete transient frame tree and snapshot displayed values.
-2. Measure content and compute rectangles with Taffy.
-3. Apply frame decoration and interaction; draw content and children through egui.
-4. Commit native edits and run frame callbacks in traversal order.
-5. Unmount absent scopes and discard the tree and closures.
+### Callbacks that just borrow
 
-Native editors draw their temporary edit immediately and commit afterward; dependent content sees the change in the following tree. State methods themselves mutate immediately, so keep construction free of application mutations for a consistent snapshot.
+Event handlers are plain `FnOnce` closures that can **borrow anything that
+lives for the frame**, like your app struct or a local `Vec`. There is no
+message enum and no `'static` bound. They run after the whole tree has been
+drawn, in order, so every frame sees the same consistent snapshot of your
+data and no handler mutates it mid-draw.
 
-The runtime retains keyed state and Taffy allocation capacity. Egui retains font and interaction caches. There is no tree diff, dependency graph, or subscription system. `show` requires one egui pass to prevent replaying effects. Native content hover styling may use the preceding pass's response; event handlers use its current response.
+### egui is still right there
+
+- dgui renders into any `&mut egui::Ui`. Use it for the whole window, or just
+  one panel of an existing egui app.
+- `Frame::egui_canvas(size, |ui| ...)` hands you a plain `egui::Ui` sized and
+  clipped by flexbox. Plots, sliders, `painter()` calls and third-party egui
+  widgets all work inside it.
+- Text uses egui's fonts and galleys. `text_input` is egui's `TextEdit`.
+- For full control, `Frame::canvas(measure, draw)` lets custom content report
+  its own size to the layout engine, including width-dependent heights, and
+  route native egui responses into the frame's `on_click`/`on_focus` handlers.
+
+## Getting started
+
+Keep a `Dgui` in your app and call `show` once per render cycle:
+
+```rust,ignore
+struct App {
+    gui: dgui::Dgui,
+}
+
+impl eframe::App for App {
+    fn ui(&mut self, host: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.gui.show(host, |ui| {
+            ui.scope("sign_in", |ui| {
+                let frame = sign_in(ui);
+                ui.add(frame);
+            });
+        });
+    }
+}
+
+// dgui does its own layout, so egui must run exactly one pass per frame:
+cc.egui_ctx.options_mut(|o| o.max_passes = 1.try_into().unwrap());
+```
+
+The root frame fills the host's available rectangle as a column. See
+[`examples/demo.rs`](examples/demo.rs) for a complete app with wrapping cards,
+keyed state that follows reordering, mounting and unmounting, and an animated,
+clickable canvas.
+
+## Good to know
+
+- **Lengths** are logical pixels. `Length::Percent(1.0)` means 100%. Padding,
+  margin and border width are uniform on all sides, and margins don't collapse.
+- **Clipping**: frames clip children to their rectangle. Corner radius rounds
+  the background and border, but clipping is still rectangular.
+- **Keys**: sibling scope keys must be unique. Wrap anything conditional or
+  reorderable in `ui.scope(key, ...)`, because unkeyed frames are identified by
+  position.
+- **State timing**: state writes made in callbacks show up in the next tree.
+  Avoid mutating state while building, so each tree comes from one consistent
+  snapshot.
+- **Borrowing `ui` twice**: store a component's frame in a local before
+  `ui.add(frame)`, since `ui.add(counter(ui))` borrows `ui` twice.
+
+## Status
+
+dgui is an early prototype. It targets native desktop and currently has no
+scrolling, multiline text input, virtualization, animation API, gamepad
+navigation, or per-element font sizes (text is a fixed 16px). None of its
+performance has been benchmarked yet.
 
 ```sh
 cargo test
-cargo check --all-targets
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
-
-This prototype targets native desktop, a fixed 16-pixel text style, and single-line editing. It has no scrolling, virtualization, controller navigation, multiline editor, persistence, or animations API. No performance claims have been benchmarked.
