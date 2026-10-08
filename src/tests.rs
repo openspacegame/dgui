@@ -88,6 +88,86 @@ fn runtime_and_state_are_send_sync() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<Dgui>();
     assert_send_sync::<State<String>>();
+    assert_send_sync::<Tasks>();
+}
+
+#[test]
+fn scoped_tasks_start_once_wake_and_pause_between_draws() {
+    use std::task::Poll;
+    let ctx = context();
+    let mut gui = Dgui::new();
+    let started = Arc::new(AtomicUsize::new(0));
+    let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let wake = Arc::new(std::sync::Mutex::new(None::<std::task::Waker>));
+    let mut counter = None;
+    let mut mount = || {
+        run(&ctx, &mut gui, [100.0, 100.0], vec![], |ui| {
+            ui.scope("wallet", |ui| {
+                let value = ui.state("value", || 0);
+                counter = Some(value);
+                let started = started.clone();
+                let ready = ready.clone();
+                let wake = wake.clone();
+                ui.tasks().spawn_once("refresh", move || {
+                    started.fetch_add(1, Ordering::Relaxed);
+                    async move {
+                        std::future::poll_fn(|cx| {
+                            *wake.lock().unwrap() = Some(cx.waker().clone());
+                            if ready.load(Ordering::Relaxed) {
+                                Poll::Ready(())
+                            } else {
+                                Poll::Pending
+                            }
+                        })
+                        .await;
+                        value.set(42);
+                    }
+                });
+            });
+        });
+    };
+    mount();
+    mount();
+    assert_eq!(started.load(Ordering::Relaxed), 1);
+    ready.store(true, Ordering::Relaxed);
+    wake.lock().unwrap().take().unwrap().wake();
+    // Waking does not poll a minimized runtime.
+    mount();
+    mount();
+    drop(mount);
+    assert_eq!(counter.unwrap().get(), 42);
+    assert_eq!(started.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn unmount_cancels_tasks_before_states_and_stale_handles_cannot_spawn() {
+    struct OnDrop(State<usize>);
+    impl Drop for OnDrop {
+        fn drop(&mut self) {
+            self.0.update(|value| *value += 1);
+        }
+    }
+    let ctx = context();
+    let mut gui = Dgui::new();
+    let mut tasks = None;
+    let mut parent = None;
+    run(&ctx, &mut gui, [100.0, 100.0], vec![], |ui| {
+        let value = ui.state("value", || 0);
+        parent = Some(value);
+        ui.scope("child", |ui| {
+            let handle = ui.tasks();
+            tasks = Some(handle.clone());
+            let guard = OnDrop(value);
+            handle.spawn(async move {
+                let _guard = guard;
+                std::future::pending::<()>().await;
+            });
+        });
+    });
+    run(&ctx, &mut gui, [100.0, 100.0], vec![], |_| {});
+    assert_eq!(parent.unwrap().get(), 1);
+    tasks.unwrap().spawn(async { panic!("unmounted task ran") });
+    run(&ctx, &mut gui, [100.0, 100.0], vec![], |_| {});
 }
 
 #[test]

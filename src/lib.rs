@@ -10,6 +10,7 @@ mod frame;
 mod scroll;
 mod state;
 mod style;
+mod tasks;
 mod virtual_list;
 pub use builtins::{button, text_input};
 pub use canvas::{AvailableSpace, Canvas, MeasureInput};
@@ -17,6 +18,7 @@ use frame::Events;
 pub use frame::Frame;
 pub use state::State;
 pub use style::{Align, Color, Direction, Justify, Length, Overflow, Style};
+pub use tasks::Tasks;
 
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use canvas::CanvasContent;
@@ -44,6 +46,7 @@ struct FrameNode<'a> {
     accessibility_label: Option<String>,
 }
 struct Build<'a> {
+    context: egui::Context,
     nodes: Vec<FrameNode<'a>>,
     visited: HashSet<ScopePath>,
     ordinals: HashMap<ScopePath, u64>,
@@ -60,6 +63,16 @@ pub struct Ui<'a, 'frame> {
     parent: usize,
 }
 impl<'frame> Ui<'_, 'frame> {
+    /// Obtain an owned task handle for the current mounted scope.
+    pub fn tasks(&mut self) -> Tasks {
+        self.scopes
+            .get_mut(&self.path)
+            .unwrap()
+            .tasks
+            .get_or_insert_with(|| tasks::TaskSet::new(self.build.context.clone()))
+            .handle()
+    }
+
     /// Shorthand for adding a container frame in the current state scope.
     pub fn frame(&mut self, style: Style, children: impl FnOnce(&mut Ui<'_, 'frame>)) {
         let parent = self.push_container(Frame::new().style(style));
@@ -174,6 +187,15 @@ pub struct Dgui {
     #[cfg(test)]
     last_layout: Vec<(egui::Id, Rect)>,
 }
+impl Drop for Dgui {
+    fn drop(&mut self) {
+        // Child tasks can capture ancestor states. Cancel every task before
+        // releasing any scope, regardless of the map's destruction order.
+        for scope in self.scopes.values_mut() {
+            scope.tasks = None;
+        }
+    }
+}
 impl Default for Dgui {
     fn default() -> Self {
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -224,6 +246,7 @@ impl Dgui {
             "dgui requires a finite host rectangle"
         );
         let mut tree = Build {
+            context: host.ctx().clone(),
             nodes: vec![FrameNode {
                 id: egui::Id::new((self.id, "root")),
                 children: Vec::new(),
@@ -309,7 +332,17 @@ impl Dgui {
         for callback in callbacks {
             callback();
         }
+        for (path, scope) in &mut self.scopes {
+            if !tree.visited.contains(path) {
+                scope.tasks = None;
+            }
+        }
         self.scopes.retain(|path, _| tree.visited.contains(path));
+        for scope in self.scopes.values_mut() {
+            if let Some(tasks) = &mut scope.tasks {
+                tasks.poll();
+            }
+        }
     }
 }
 

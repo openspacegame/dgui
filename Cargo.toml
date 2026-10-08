@@ -10,6 +10,7 @@ ahash = "0.8"
 egui = "0.36"
 taffy = "0.9"
 generational-box = "0.7"
+futures-util = "0.3"
 
 [dev-dependencies]
 eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }

@@ -68,6 +68,8 @@ impl<T: Send + Sync> State<T> {
 
 pub(crate) struct Scope {
     pub mount: u64,
+    // Tasks must drop before the states they can access during destruction.
+    pub tasks: Option<crate::tasks::TaskSet>,
     owner: Owner<SyncStorage>,
     values: HashMap<u64, Box<dyn Any + Send + Sync>>,
 }
@@ -75,6 +77,7 @@ impl Scope {
     pub fn new(mount: u64) -> Self {
         Self {
             mount,
+            tasks: None,
             owner: Owner::default(),
             values: HashMap::new(),
         }
