@@ -84,6 +84,42 @@ fn near(actual: f32, expected: f32) {
 }
 
 #[test]
+fn read_guards_allow_shared_access_and_release_conflict_tracking_on_drop() {
+    run(&context(), &mut Dgui::new(), [100.0, 100.0], vec![], |ui| {
+        let state = ui.state("value", || vec![1, 2]);
+        let first = state.read();
+        let second = state.read();
+        assert_eq!(first.len(), 2);
+        assert_eq!(&*first, &*second);
+        assert_eq!(state.with(Vec::len), 2);
+        assert!(catch_unwind(AssertUnwindSafe(|| state.set(vec![3]))).is_err());
+        drop(first);
+        assert!(catch_unwind(AssertUnwindSafe(|| state.set(vec![3]))).is_err());
+        drop(second);
+        state.set(vec![3]);
+        assert_eq!(&*state.read(), &[3]);
+        state.update(|_| {
+            assert!(catch_unwind(AssertUnwindSafe(|| state.read())).is_err());
+        });
+        assert_eq!(state.get(), vec![3]);
+    });
+}
+
+#[test]
+#[should_panic]
+fn read_guard_rejects_unmounted_state() {
+    let ctx = context();
+    let mut gui = Dgui::new();
+    let mut state = None;
+    run(&ctx, &mut gui, [100.0, 100.0], vec![], |ui| {
+        ui.scope("child", |ui| state = Some(ui.state("value", || 1)));
+    });
+    run(&ctx, &mut gui, [100.0, 100.0], vec![], |_| {});
+    let state = state.unwrap();
+    let _guard = state.read();
+}
+
+#[test]
 fn runtime_and_state_are_send_sync() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<Dgui>();

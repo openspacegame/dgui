@@ -1,6 +1,6 @@
 use ahash::AHashMap as HashMap;
-use generational_box::{GenerationalBox, Owner, SyncStorage};
-use std::{any::Any, cell::RefCell};
+use generational_box::{AnyStorage, GenerationalBox, Owner, SyncStorage};
+use std::{any::Any, cell::RefCell, marker::PhantomData, ops::Deref, rc::Rc};
 
 thread_local! {
     // SyncStorage waits for cross-thread access. Reject reentrant conflicting
@@ -37,7 +37,7 @@ impl Drop for BorrowGuard {
 }
 
 /// A Copy handle to state owned by a mounted component scope.
-/// Access after unmount, or conflicting access inside `with`/`update`, panics.
+/// Access after unmount, or conflicting access while borrowed, panics.
 /// Handles and values can cross threads; accesses use synchronized storage.
 pub struct State<T: 'static>(pub(crate) GenerationalBox<T, SyncStorage>);
 impl<T> Copy for State<T> {}
@@ -47,6 +47,20 @@ impl<T> Clone for State<T> {
     }
 }
 impl<T: Send + Sync> State<T> {
+    /// Borrow the value until the returned guard is dropped.
+    ///
+    /// Multiple reads are allowed. Drop all read guards before updating this
+    /// state or unmounting its scope. Never hold a guard across `.await`.
+    /// Panics on access after unmount or conflicting access on this thread.
+    pub fn read(&self) -> StateRead<'_, T> {
+        let borrow = BorrowGuard::enter(self.0.raw_ptr(), false);
+        StateRead {
+            value: self.0.read(),
+            _borrow: borrow,
+            _thread: PhantomData,
+        }
+    }
+
     pub fn get(self) -> T
     where
         T: Clone,
@@ -54,8 +68,7 @@ impl<T: Send + Sync> State<T> {
         self.with(Clone::clone)
     }
     pub fn with<R>(self, read: impl FnOnce(&T) -> R) -> R {
-        let _guard = BorrowGuard::enter(self.0.raw_ptr(), false);
-        read(&self.0.read())
+        read(&self.read())
     }
     pub fn set(self, value: T) {
         self.update(|stored| *stored = value);
@@ -63,6 +76,30 @@ impl<T: Send + Sync> State<T> {
     pub fn update<R>(self, update: impl FnOnce(&mut T) -> R) -> R {
         let _guard = BorrowGuard::enter(self.0.raw_ptr(), true);
         update(&mut self.0.write())
+    }
+}
+
+/// A read borrow of a State, released on drop.
+///
+/// This guard stays on its borrowing thread and must not cross an await or
+/// outlive its mounted scope. Clone only needed data to move it into async work.
+///
+/// ```compile_fail
+/// fn requires_send<T: Send>() {}
+/// requires_send::<dgui::StateRead<'static, usize>>();
+/// ```
+pub struct StateRead<'a, T: Send + Sync + 'static> {
+    // Release the storage lock before the thread's borrow bookkeeping.
+    value: <SyncStorage as AnyStorage>::Ref<'a, T>,
+    _borrow: BorrowGuard,
+    _thread: PhantomData<Rc<()>>,
+}
+
+impl<T: Send + Sync> Deref for StateRead<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.value
     }
 }
 

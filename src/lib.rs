@@ -16,7 +16,7 @@ pub use builtins::{button, text_input};
 pub use canvas::{AvailableSpace, Canvas, MeasureInput};
 use frame::Events;
 pub use frame::Frame;
-pub use state::State;
+pub use state::{State, StateRead};
 pub use style::{Align, Color, Direction, Justify, Length, Overflow, Style};
 pub use tasks::Tasks;
 
