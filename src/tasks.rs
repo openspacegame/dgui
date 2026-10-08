@@ -1,11 +1,12 @@
 use ahash::AHashSet;
 use futures_util::{Stream, stream::FuturesUnordered};
+use generational_box::{GenerationalBox, Owner, SyncStorage};
 use std::{
     future::Future,
     hash::Hash,
     pin::Pin,
     sync::{
-        Arc, Mutex, Weak,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     task::{Context, Poll, Wake, Waker},
@@ -13,19 +14,19 @@ use std::{
 
 type Task = Pin<Box<dyn Future<Output = ()> + Send>>;
 
-/// An owned handle for starting work in a component's mounted scope.
+/// A Copy handle for starting work in a component's mounted scope.
 ///
 /// Capture this handle in ordinary widget callbacks. Futures may capture owned
 /// data and states from this scope or its ancestors, but not shorter-lived states.
 /// The scope polls tasks during `show`; hiding the runtime pauses them, and
 /// unmounting drops them. Spawning through an unmounted handle does nothing.
-#[derive(Clone)]
-pub struct Tasks(Weak<Mutex<Inbox>>);
+#[derive(Clone, Copy)]
+pub struct Tasks(GenerationalBox<Mutex<Inbox>, SyncStorage>);
 
 impl Tasks {
     /// Start an operation. The future is first polled after this draw's callbacks.
     pub fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
-        if let Some(inbox) = self.0.upgrade() {
+        if let Ok(inbox) = self.0.try_read() {
             let mut inbox = inbox.lock().unwrap();
             inbox.pending.push(Box::pin(future));
             inbox.context.request_repaint();
@@ -39,10 +40,14 @@ impl Tasks {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let Some(inbox) = self.0.upgrade() else {
-            return;
+        let started = {
+            let Ok(inbox) = self.0.try_read() else {
+                return;
+            };
+            let started = inbox.lock().unwrap().started.insert(crate::hash(key));
+            started
         };
-        if inbox.lock().unwrap().started.insert(crate::hash(key)) {
+        if started {
             // A factory may itself use a Tasks handle; never call it under a lock.
             self.spawn(factory());
         }
@@ -56,36 +61,42 @@ struct Inbox {
 }
 
 pub(crate) struct TaskSet {
-    inbox: Arc<Mutex<Inbox>>,
+    inbox: GenerationalBox<Mutex<Inbox>, SyncStorage>,
     // Futures need Send, not Sync. The mutex preserves Dgui's Send + Sync API.
     running: Mutex<FuturesUnordered<Task>>,
     wake: Arc<Repaint>,
+    // Invalidate Copy handles when the owning task set is dropped.
+    _owner: Owner<SyncStorage>,
 }
 
 impl TaskSet {
     pub fn new(context: egui::Context) -> Self {
+        let owner = Owner::default();
+        let inbox = owner.insert(Mutex::new(Inbox {
+            pending: Vec::new(),
+            started: AHashSet::default(),
+            context: context.clone(),
+        }));
         Self {
-            inbox: Arc::new(Mutex::new(Inbox {
-                pending: Vec::new(),
-                started: AHashSet::default(),
-                context: context.clone(),
-            })),
+            inbox,
             running: Mutex::new(FuturesUnordered::new()),
             wake: Arc::new(Repaint {
                 context,
                 ready: AtomicBool::new(true),
             }),
+            _owner: owner,
         }
     }
 
     pub fn handle(&self) -> Tasks {
-        Tasks(Arc::downgrade(&self.inbox))
+        Tasks(self.inbox)
     }
 
     pub fn poll(&mut self) {
         let running = self.running.get_mut().unwrap();
         let added = {
-            let mut inbox = self.inbox.lock().unwrap();
+            let inbox = self.inbox.read();
+            let mut inbox = inbox.lock().unwrap();
             let added = !inbox.pending.is_empty();
             for task in inbox.pending.drain(..) {
                 running.push(task);

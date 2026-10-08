@@ -89,6 +89,8 @@ fn runtime_and_state_are_send_sync() {
     assert_send_sync::<Dgui>();
     assert_send_sync::<State<String>>();
     assert_send_sync::<Tasks>();
+    fn assert_copy<T: Copy>() {}
+    assert_copy::<Tasks>();
 }
 
 #[test]
@@ -157,7 +159,7 @@ fn unmount_cancels_tasks_before_states_and_stale_handles_cannot_spawn() {
         parent = Some(value);
         ui.scope("child", |ui| {
             let handle = ui.tasks();
-            tasks = Some(handle.clone());
+            tasks = Some(handle);
             let guard = OnDrop(value);
             handle.spawn(async move {
                 let _guard = guard;
@@ -168,6 +170,17 @@ fn unmount_cancels_tasks_before_states_and_stale_handles_cannot_spawn() {
     run(&ctx, &mut gui, [100.0, 100.0], vec![], |_| {});
     assert_eq!(parent.unwrap().get(), 1);
     tasks.unwrap().spawn(async { panic!("unmounted task ran") });
+    run(&ctx, &mut gui, [100.0, 100.0], vec![], |ui| {
+        ui.scope("child", |ui| {
+            ui.tasks();
+            tasks
+                .unwrap()
+                .spawn(async { panic!("stale task reached a new mount") });
+            tasks.unwrap().spawn_once("stale", || async {
+                panic!("stale keyed task reached a new mount")
+            });
+        });
+    });
     run(&ctx, &mut gui, [100.0, 100.0], vec![], |_| {});
 }
 

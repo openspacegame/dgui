@@ -63,7 +63,7 @@ pub struct Ui<'a, 'frame> {
     parent: usize,
 }
 impl<'frame> Ui<'_, 'frame> {
-    /// Obtain an owned task handle for the current mounted scope.
+    /// Obtain a Copy task handle for the current mounted scope.
     pub fn tasks(&mut self) -> Tasks {
         self.scopes
             .get_mut(&self.path)
