@@ -17,7 +17,10 @@ fn text_layout(ctx: &egui::Context, text: &str, width: f32) -> std::sync::Arc<eg
     })
 }
 impl<'a> Frame<'a> {
-    /// Text content that wraps within this frame's content rectangle.
+    /// A frame containing text that wraps to fit the frame's width.
+    ///
+    /// Its preferred width is the unwrapped text width, and its height grows
+    /// with the number of wrapped lines.
     pub fn text(text: impl Into<String>) -> Self {
         let text: Rc<str> = text.into().into();
         let measured = text.clone();
@@ -34,8 +37,12 @@ impl<'a> Frame<'a> {
     }
 }
 
-/// A focusable frame containing centered text. All decoration and click handling
-/// comes from the common frame machinery. `children` can replace its text.
+/// A button: a padded, focusable frame with centered text and hover, pressed
+/// and focus backgrounds.
+///
+/// It is an ordinary [`Frame`], so attach behavior with
+/// [`on_click`](Frame::on_click) and restyle it with any frame method. Calling
+/// [`children`](Frame::children) replaces the text, e.g. with an icon.
 pub fn button<'a>(text: impl Into<String>) -> Frame<'a> {
     let text = text.into();
     Frame::new()
@@ -51,8 +58,12 @@ pub fn button<'a>(text: impl Into<String>) -> Frame<'a> {
         .children(move |ui| ui.add(Frame::text(text)))
 }
 
-/// A frame containing a native single-line editor. Its decoration and event
-/// handlers are shared with all frames; changes commit after the tree is drawn.
+/// A single-line text editor bound to `value`.
+///
+/// Edits are written to `value` after the tree is drawn, like other
+/// callbacks. The editor prefers a width of 200 points, but stretches or
+/// shrinks with layout like any frame. Clicks anywhere in the frame, including
+/// its padding, focus it.
 pub fn text_input<'a>(value: State<String>) -> Frame<'a> {
     let mut text = value.get();
     Frame::canvas(

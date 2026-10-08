@@ -8,12 +8,40 @@ use std::{
 use crate::{AvailableSpace, Dgui, Frame, Length, Style, Ui};
 
 impl<'frame> Frame<'frame> {
-    /// A vertical scroll viewport that builds only visible, keyed rows.
+    /// A vertically scrolling list of `row_count` rows of equal height that
+    /// builds only the rows in view, so it stays fast with millions of rows.
     ///
-    /// Give the frame a height or let it grow in a bounded parent. Row height
-    /// includes all padding and spacing; row contents are clipped to that height.
-    /// Keep selection and editable drafts in application state, because rows
-    /// leaving the overscan range unmount their local component state.
+    /// - `row_height` is each row's full height in points, including any
+    ///   padding or spacing; row contents are clipped to it.
+    /// - `key` gives each row index a stable key. Each row is built in its own
+    ///   [`scope`](Ui::scope) with that key.
+    /// - `row` builds the row at an index.
+    ///
+    /// The list grows to fill its parent along the main axis, so give the
+    /// parent (or the list) a bounded height. Rows scrolled out of view
+    /// unmount, dropping their state, so keep anything that must survive, such
+    /// as selection or drafts, in state outside the list.
+    ///
+    /// The rows are built in a separate runtime, so they can't
+    /// [declare](Ui::state) state in the list's scope, but can use [`State`](crate::State)
+    /// handles captured from outside.
+    ///
+    /// # Panics
+    ///
+    /// If `row_height` isn't positive and finite.
+    ///
+    /// ```
+    /// # fn build(ui: &mut dgui::Ui<'_, '_>) {
+    /// use dgui::Frame;
+    ///
+    /// ui.add(Frame::virtual_list(
+    ///     1_000_000,
+    ///     24.0,
+    ///     |index| index,
+    ///     |ui, index| ui.add(Frame::text(format!("Row {index}"))),
+    /// ));
+    /// # }
+    /// ```
     pub fn virtual_list<K: Hash>(
         row_count: usize,
         row_height: f32,

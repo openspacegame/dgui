@@ -36,9 +36,22 @@ impl Drop for BorrowGuard {
     }
 }
 
-/// A Copy handle to state owned by a mounted component scope.
-/// Access after unmount, or conflicting access while borrowed, panics.
-/// Handles and values can cross threads; accesses use synchronized storage.
+/// A `Copy` handle to a value owned by a component scope, created by
+/// [`Ui::state`](crate::Ui::state).
+///
+/// Capture the handle in closures, event callbacks and async tasks freely; it
+/// stays valid until its scope unmounts. Handles and values can cross threads,
+/// since the storage is synchronized.
+///
+/// Accesses are checked like a `RefCell`: any number of reads at once, or a
+/// single write. Writes from event callbacks are seen the next time the tree
+/// is built.
+///
+/// # Panics
+///
+/// Every accessor panics if the scope has unmounted, or if the access
+/// conflicts with another one in progress on the same thread, such as calling
+/// [`update`](Self::update) inside [`with`](Self::with) on the same state.
 pub struct State<T: 'static>(pub(crate) GenerationalBox<T, SyncStorage>);
 impl<T> Copy for State<T> {}
 impl<T> Clone for State<T> {
@@ -61,25 +74,31 @@ impl<T: Send + Sync> State<T> {
         }
     }
 
+    /// Returns a clone of the value.
     pub fn get(self) -> T
     where
         T: Clone,
     {
         self.with(Clone::clone)
     }
+    /// Calls `read` with a reference to the value and returns its result.
     pub fn with<R>(self, read: impl FnOnce(&T) -> R) -> R {
         read(&self.read())
     }
+    /// Replaces the value.
     pub fn set(self, value: T) {
         self.update(|stored| *stored = value);
     }
+    /// Calls `update` with a mutable reference to the value and returns its
+    /// result.
     pub fn update<R>(self, update: impl FnOnce(&mut T) -> R) -> R {
         let _guard = BorrowGuard::enter(self.0.raw_ptr(), true);
         update(&mut self.0.write())
     }
 }
 
-/// A read borrow of a State, released on drop.
+/// A read borrow of a [`State`], returned by [`State::read`] and released on
+/// drop.
 ///
 /// This guard stays on its borrowing thread and must not cross an await or
 /// outlive its mounted scope. Clone only needed data to move it into async work.

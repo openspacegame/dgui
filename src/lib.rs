@@ -1,8 +1,76 @@
 //! A GUI built from a fresh frame tree on every render cycle.
 //!
-//! See the `demo` example for keyed components and Copy state handles.
-//! Configure egui with `max_passes = 1` and call [`Dgui::show`] once per runtime
-//! per frame. Callbacks run after the complete tree has been drawn.
+//! Each frame, your code builds the whole UI as a tree of [`Frame`]s. dgui lays
+//! the tree out with flexbox ([Taffy](https://docs.rs/taffy)), draws it with
+//! [egui](https://docs.rs/egui), runs the callbacks it collected, and throws the
+//! tree away. Nothing is diffed or retained except the state you ask for.
+//!
+//! # Example
+//!
+//! ```no_run
+//! use dgui::{Align, Dgui, Direction, Frame, button};
+//!
+//! struct App {
+//!     gui: Dgui,
+//! }
+//!
+//! impl eframe::App for App {
+//!     fn ui(&mut self, host: &mut egui::Ui, _frame: &mut eframe::Frame) {
+//!         self.gui.show(host, |ui| {
+//!             let count = ui.state("count", || 0);
+//!             ui.add(
+//!                 Frame::new()
+//!                     .direction(Direction::Row)
+//!                     .align(Align::Center)
+//!                     .gap(12.0)
+//!                     .children(move |ui| {
+//!                         ui.add(button("−").on_click(move || count.update(|n| *n -= 1)));
+//!                         ui.add(Frame::text(format!("Count: {}", count.get())));
+//!                         ui.add(button("+").on_click(move || count.update(|n| *n += 1)));
+//!                     }),
+//!             );
+//!         });
+//!     }
+//! }
+//!
+//! fn main() -> eframe::Result {
+//!     eframe::run_native(
+//!         "counter",
+//!         eframe::NativeOptions::default(),
+//!         Box::new(|cc| {
+//!             // dgui requires single-pass egui.
+//!             cc.egui_ctx
+//!                 .options_mut(|options| options.max_passes = 1.try_into().unwrap());
+//!             Ok(Box::new(App { gui: Dgui::new() }))
+//!         }),
+//!     )
+//! }
+//! ```
+//!
+//! # Concepts
+//!
+//! - **Everything is a [`Frame`].** Containers, [text](Frame::text),
+//!   [buttons](button), [text inputs](text_input), [custom
+//!   canvases](Frame::canvas) and [virtual lists](Frame::virtual_list) are all
+//!   frames, and all share the same [`Style`] and event methods.
+//! - **Building happens before drawing.** [`Ui::add`] runs a frame's
+//!   [`children`](Frame::children) closure immediately, so the complete tree
+//!   exists before layout. Measurement and painting come later.
+//! - **Callbacks run after drawing.** [`Frame::on_click`] and friends fire once
+//!   the whole tree has been laid out and painted, so the tree never changes
+//!   while it is being built or drawn. State they write is seen the next time
+//!   the tree is built.
+//! - **State is keyed, not retained.** [`Ui::state`] returns a [`State`] handle
+//!   owned by the enclosing [`Ui::scope`]. A scope that isn't built during a
+//!   call to [`Dgui::show`] unmounts, dropping its state and [`Tasks`].
+//!
+//! # Requirements
+//!
+//! - The egui context must use `max_passes = 1`; [`Dgui::show`] panics
+//!   otherwise.
+//! - Call `show` at most once per [`Dgui`] per egui frame, with a finite host
+//!   rectangle.
+#![warn(missing_docs)]
 
 mod builtins;
 mod canvas;
@@ -53,8 +121,15 @@ struct Build<'a> {
     ordinals: HashMap<ScopePath, u64>,
 }
 
-/// Builder for a transient frame tree. Container closures execute now;
-/// widget callbacks execute after layout and drawing.
+/// Builder for the frame tree, passed to [`Dgui::show`] and to every
+/// [`Frame::children`] closure.
+///
+/// A `Ui` adds children to one parent frame and declares state in one keyed
+/// scope. Container closures run immediately; event callbacks run after the
+/// whole tree has been laid out and drawn.
+///
+/// `'frame` is the lifetime of the tree itself: closures given to frames may
+/// borrow anything that outlives the call to [`Dgui::show`].
 pub struct Ui<'a, 'frame> {
     build: &'a mut Build<'frame>,
     scopes: &'a mut HashMap<ScopePath, Scope>,
@@ -64,7 +139,8 @@ pub struct Ui<'a, 'frame> {
     parent: usize,
 }
 impl<'frame> Ui<'_, 'frame> {
-    /// Obtain a Copy task handle for the current mounted scope.
+    /// Returns the [`Tasks`] handle of the current scope, for running async
+    /// work that is cancelled when the scope unmounts.
     pub fn tasks(&mut self) -> Tasks {
         self.scopes
             .get_mut(&self.path)
@@ -74,7 +150,11 @@ impl<'frame> Ui<'_, 'frame> {
             .handle()
     }
 
-    /// Shorthand for adding a container frame in the current state scope.
+    /// Adds a container with the given style and builds its children now.
+    ///
+    /// Equivalent to `ui.add(Frame::new().style(style).children(children))`,
+    /// except that `children` need not be `'frame`, so it can borrow locals.
+    /// The children stay in the current state scope.
     pub fn frame(&mut self, style: Style, children: impl FnOnce(&mut Ui<'_, 'frame>)) {
         let parent = self.push_container(Frame::new().style(style));
         children(&mut Ui {
@@ -86,7 +166,10 @@ impl<'frame> Ui<'_, 'frame> {
             parent,
         });
     }
-    /// Add a frame, constructing its children now, before layout or interaction.
+    /// Appends `frame` as the next child of the current parent.
+    ///
+    /// If the frame has [`children`](Frame::children), that closure runs now,
+    /// before this call returns and before any layout or interaction.
     pub fn add(&mut self, mut frame: Frame<'frame>) {
         let children = frame.children.take();
         let parent = if children.is_some() {
@@ -106,8 +189,34 @@ impl<'frame> Ui<'_, 'frame> {
         }
     }
 
-    /// Enter a keyed component scope without adding a layout frame.
-    /// Sibling keys must be unique. Missing scopes unmount at the end of `show`.
+    /// Builds `children` inside a keyed component scope. The scope adds no
+    /// frame of its own; its children join the current parent.
+    ///
+    /// A scope owns the [`State`]s declared in it and its [`Tasks`]. It is
+    /// identified by its key path from the root, so it keeps that state across
+    /// frames even if it moves among its siblings. A scope that isn't built
+    /// during a call to [`Dgui::show`] unmounts at the end of that call.
+    ///
+    /// Scopes also anchor widget identity: frames are identified by their
+    /// order within their scope, so wrapping list items in keyed scopes keeps
+    /// focus and scroll positions attached to the right item.
+    ///
+    /// # Panics
+    ///
+    /// If two sibling scopes in one draw use the same key.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # fn build(ui: &mut dgui::Ui<'_, '_>, users: &[(u64, String)]) {
+    /// for (id, name) in users {
+    ///     ui.scope(id, |ui| {
+    ///         let draft = ui.state("draft", || name.clone());
+    ///         ui.add(dgui::text_input(draft));
+    ///     });
+    /// }
+    /// # }
+    /// ```
     pub fn scope(&mut self, key: impl Hash, children: impl FnOnce(&mut Ui<'_, 'frame>)) {
         let mut path = self.path.clone();
         path.push(hash(key));
@@ -129,9 +238,20 @@ impl<'frame> Ui<'_, 'frame> {
         };
         children(&mut child);
     }
-    /// Get state local to this keyed scope. Values live until the scope unmounts.
-    /// Declare each key once per scope per draw; pass its handle to share state.
-    /// Panics if a key is declared twice in the same scope during one draw.
+    /// Declares state local to the current scope and returns its handle.
+    ///
+    /// The first time `key` is declared in a mounted scope, `init` creates the
+    /// value; later frames return the same value and don't call `init`. The
+    /// value is dropped when the scope unmounts. State declared outside any
+    /// [`scope`](Self::scope) lives as long as the [`Dgui`].
+    ///
+    /// Declare each key once per scope per draw. To use the state elsewhere,
+    /// pass the `Copy` handle along instead of declaring it again.
+    ///
+    /// # Panics
+    ///
+    /// If `key` was already declared in this scope during this draw, or was
+    /// declared earlier with a different type `T`.
     #[track_caller]
     pub fn state<T: Send + Sync + 'static>(
         &mut self,
@@ -186,8 +306,13 @@ fn hash(key: impl Hash) -> u64 {
     hasher.finish()
 }
 
-/// Persistent state storage and backend integration for one tree.
-/// The frame tree and its callbacks are discarded after every call to `show`.
+/// A dgui runtime: holds the persistent state of one tree and draws it into
+/// an egui [`Ui`](egui::Ui).
+///
+/// Keep one `Dgui` per independent tree, typically as a field of your app.
+/// The frame tree and its callbacks are discarded after every call to
+/// [`show`](Self::show); only [`State`]s and [`Tasks`] persist. Dropping the
+/// runtime cancels all its tasks and drops all its state.
 pub struct Dgui {
     id: u64,
     next_mount: u64,
@@ -217,14 +342,29 @@ impl Default for Dgui {
     }
 }
 impl Dgui {
+    /// Creates a runtime with no state.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Build, lay out, draw, and dispatch callbacks.
-    /// The root fills the host's available rectangle. Use a finite host rectangle.
-    /// Configure the host context with `max_passes = 1`. Call once per runtime
-    /// per frame; callbacks execute once after the tree has been drawn.
+    /// Builds, lays out and draws one frame of the tree, then runs callbacks.
+    ///
+    /// In order, this:
+    /// 1. calls `build` to construct the complete tree,
+    /// 2. lays it out with a root column that fills the host's available
+    ///    rectangle,
+    /// 3. draws it into `host`,
+    /// 4. runs the event callbacks collected while drawing,
+    /// 5. unmounts every scope that `build` didn't visit, and
+    /// 6. polls the remaining scopes' [`Tasks`].
+    ///
+    /// Call this at most once per runtime per egui frame. Use
+    /// [`show_styled`](Self::show_styled) to style or size the root.
+    ///
+    /// # Panics
+    ///
+    /// If the egui context's `max_passes` isn't 1, or the host's available
+    /// rectangle is infinite (e.g. directly inside a scroll area).
     pub fn show<'frame>(&mut self, host: &mut egui::Ui, build: impl FnOnce(&mut Ui<'_, 'frame>)) {
         self.show_styled(
             host,
@@ -235,8 +375,12 @@ impl Dgui {
         );
     }
 
-    /// Build a root with declarative sizing. Auto height follows its content;
-    /// percentage dimensions fill the corresponding available host dimension.
+    /// Like [`show`](Self::show), but with `style` on the root frame.
+    ///
+    /// Percentage sizes are fractions of the host's available rectangle, and
+    /// [`Length::Auto`] sizes the root to its content. The host's cursor
+    /// advances past the root, so an auto-height root can be followed by
+    /// other egui widgets.
     pub fn show_styled<'frame>(
         &mut self,
         host: &mut egui::Ui,

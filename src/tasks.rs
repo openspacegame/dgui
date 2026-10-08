@@ -14,17 +14,42 @@ use std::{
 
 type Task = Pin<Box<dyn Future<Output = ()> + Send>>;
 
-/// A Copy handle for starting work in a component's mounted scope.
+/// A `Copy` handle for running async work owned by a component scope,
+/// returned by [`Ui::tasks`](crate::Ui::tasks).
 ///
-/// Capture this handle in ordinary widget callbacks. Futures may capture owned
-/// data and states from this scope or its ancestors, but not shorter-lived states.
-/// The scope polls tasks during `show`; hiding the runtime pauses them, and
-/// unmounting drops them. Spawning through an unmounted handle does nothing.
+/// Tasks run on the UI thread, polled by [`Dgui::show`](crate::Dgui::show)
+/// after callbacks run, and a task waking up requests an egui repaint. Tasks
+/// only make progress while `show` is being called: hiding the runtime pauses
+/// them, and unmounting the scope drops them. Spawning through a handle whose
+/// scope has unmounted does nothing.
+///
+/// Futures may capture owned data and [`State`](crate::State)s from this scope
+/// or its ancestors, which outlive the task. Don't capture states from
+/// descendant scopes, which may unmount first. Since tasks are polled on the
+/// UI thread, they should await I/O rather than block.
+///
+/// ```
+/// # fn build(ui: &mut dgui::Ui<'_, '_>) {
+/// use dgui::{Frame, button};
+///
+/// let status = ui.state("status", || String::from("idle"));
+/// let tasks = ui.tasks();
+/// ui.add(button("Load").on_click(move || {
+///     tasks.spawn(async move {
+///         status.set("loading".into());
+///         // ... await some I/O ...
+///         status.set("done".into());
+///     });
+/// }));
+/// ui.add(Frame::text(status.get()));
+/// # }
+/// ```
 #[derive(Clone, Copy)]
 pub struct Tasks(GenerationalBox<Mutex<Inbox>, SyncStorage>);
 
 impl Tasks {
-    /// Start an operation. The future is first polled after this draw's callbacks.
+    /// Starts running `future`. It is first polled at the end of the current
+    /// (or, from outside `show`, the next) call to `show`.
     pub fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
         if let Ok(inbox) = self.0.try_read() {
             let mut inbox = inbox.lock().unwrap();
@@ -33,9 +58,14 @@ impl Tasks {
         }
     }
 
-    /// Start once per key for this mount, even if the operation completes.
-    /// The factory runs only on the first call. Changing inputs should change
-    /// the enclosing scope key, dropping its old state and tasks together.
+    /// Spawns the future made by `factory` the first time `key` is used in
+    /// this mounted scope, and does nothing on later calls, even after that
+    /// future has finished.
+    ///
+    /// Use this to start a load when a component first appears. To redo the
+    /// work when its inputs change, put the inputs in the enclosing
+    /// [`scope`](crate::Ui::scope) key: the old scope unmounts, dropping its
+    /// state and tasks, and the new one starts fresh.
     pub fn spawn_once<F>(&self, key: impl Hash, factory: impl FnOnce() -> F)
     where
         F: Future<Output = ()> + Send + 'static,
