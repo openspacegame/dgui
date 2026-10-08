@@ -1,8 +1,8 @@
 //! A GUI built from a fresh frame tree on every render cycle.
 //!
 //! See the `demo` example for keyed components and Copy state handles.
-//! Call [`Dgui::show`] once per runtime per egui pass. The tree is rebuilt on
-//! repeated passes; interaction effects are dispatched once per displayed frame.
+//! Configure egui with `max_passes = 1` and call [`Dgui::show`] once per runtime
+//! per frame. Callbacks run after the complete tree has been drawn.
 
 mod builtins;
 mod canvas;
@@ -93,8 +93,7 @@ impl<'frame> Ui<'_, 'frame> {
     }
 
     /// Enter a keyed component scope without adding a layout frame.
-    /// Sibling keys must be unique. Missing scopes unmount at the next frame
-    /// boundary, after all passes have had the opportunity to visit them.
+    /// Sibling keys must be unique. Missing scopes unmount at the end of `show`.
     pub fn scope(&mut self, key: impl Hash, children: impl FnOnce(&mut Ui<'_, 'frame>)) {
         let mut path = self.path.clone();
         path.push(hash(key));
@@ -172,9 +171,6 @@ pub struct Dgui {
     id: u64,
     next_mount: u64,
     scopes: HashMap<ScopePath, Scope>,
-    frame: Option<(egui::ViewportId, u64)>,
-    visited: HashSet<ScopePath>,
-    dispatched: HashSet<egui::Id>,
     #[cfg(test)]
     last_layout: Vec<(egui::Id, Rect)>,
 }
@@ -185,9 +181,6 @@ impl Default for Dgui {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             next_mount: 0,
             scopes: HashMap::from([(Vec::new(), Scope::new(0))]),
-            frame: None,
-            visited: HashSet::new(),
-            dispatched: HashSet::new(),
             #[cfg(test)]
             last_layout: Vec::new(),
         }
@@ -200,9 +193,8 @@ impl Dgui {
 
     /// Build, lay out, draw, and dispatch callbacks.
     /// The root fills the host's available rectangle. Use a finite host rectangle.
-    /// A runtime belongs to one viewport. Repeated egui passes rebuild the tree
-    /// without replaying interaction effects. Effects are not rolled back when
-    /// egui discards a pass; defer consequential host actions to its pass boundary.
+    /// Configure the host context with `max_passes = 1`. Call once per runtime
+    /// per frame; callbacks execute once after the tree has been drawn.
     pub fn show<'frame>(&mut self, host: &mut egui::Ui, build: impl FnOnce(&mut Ui<'_, 'frame>)) {
         self.show_styled(
             host,
@@ -221,15 +213,11 @@ impl Dgui {
         style: Style,
         build: impl FnOnce(&mut Ui<'_, 'frame>),
     ) {
-        let frame = (host.ctx().viewport_id(), host.ctx().cumulative_frame_nr());
-        if self.frame != Some(frame) {
-            if self.frame.is_some() {
-                self.scopes.retain(|path, _| self.visited.contains(path));
-            }
-            self.visited.clear();
-            self.dispatched.clear();
-            self.frame = Some(frame);
-        }
+        assert_eq!(
+            host.ctx().options(|options| options.max_passes.get()),
+            1,
+            "dgui requires egui max_passes = 1"
+        );
         let root_rect = host.available_rect_before_wrap();
         assert!(
             root_rect.is_finite(),
@@ -309,7 +297,6 @@ impl Dgui {
             layout: &mut layout,
             ids: &ids,
             callbacks: &mut callbacks,
-            dispatched: &mut self.dispatched,
             #[cfg(test)]
             rectangles: Vec::new(),
         };
@@ -322,7 +309,7 @@ impl Dgui {
         for callback in callbacks {
             callback();
         }
-        self.visited.extend(tree.visited);
+        self.scopes.retain(|path, _| tree.visited.contains(path));
     }
 }
 
@@ -357,7 +344,6 @@ fn render<'a>(
     content_rect: Rect,
     clip: Rect,
     callbacks: &mut Vec<Callback<'a>>,
-    dispatched: &mut HashSet<egui::Id>,
 ) {
     let mut ui = host.new_child(
         egui::UiBuilder::new()
@@ -420,8 +406,6 @@ fn render<'a>(
         callbacks,
         response: response.clone(),
         content_response: None,
-        dispatched,
-        deferred_ordinal: 0,
     };
     if let Some(canvas) = &mut node.canvas
         && let Some(paint) = canvas.paint.take()
@@ -439,63 +423,23 @@ fn render<'a>(
         || response.clone(),
         |content| response.clone().union(content),
     );
-    if let Some(observe) = node.events.layout.take() {
-        observe(&combined);
-    }
-    for (event, (triggered, callback)) in [
+    for (triggered, callback) in [
         (clicked, &mut node.events.click),
         (hovered, &mut node.events.hover),
         (gained_focus, &mut node.events.focus),
         (lost_focus, &mut node.events.blur),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    ] {
         if triggered
             && node.enabled
-            && callback.is_some()
-            && canvas_context
-                .dispatched
-                .insert(node.id.with(("event", event)))
             && let Some(callback) = callback.take()
         {
             canvas_context.callbacks.push(callback);
         }
     }
     if let Some(callback) = node.events.response.take() {
-        let state = response_state(&combined);
-        if canvas_context
-            .dispatched
-            .insert(node.id.with(("response", state)))
-        {
-            canvas_context
-                .callbacks
-                .push(Box::new(move || callback(combined)));
-        }
-    }
-}
-
-fn response_state(response: &egui::Response) -> u16 {
-    // A click can acquire hover/focus flags in a later layout pass. Those
-    // secondary changes must not replay the same click handler.
-    if response.clicked() || response.secondary_clicked() || response.middle_clicked() {
-        1
-    } else if response.drag_stopped() {
-        2
-    } else if response.drag_started() {
-        3
-    } else if response.dragged() {
-        4
-    } else if response.changed() {
-        5
-    } else if response.gained_focus() {
-        6
-    } else if response.lost_focus() {
-        7
-    } else if response.hovered() {
-        8
-    } else {
-        0
+        canvas_context
+            .callbacks
+            .push(Box::new(move || callback(combined)));
     }
 }
 

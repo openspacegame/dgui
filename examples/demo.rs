@@ -97,6 +97,10 @@ fn main() -> eframe::Result {
             viewport: egui::ViewportBuilder::default().with_inner_size([900.0, 720.0]),
             ..Default::default()
         },
-        Box::new(|_cc| Ok(Box::new(Demo::default()))),
+        Box::new(|cc| {
+            cc.egui_ctx
+                .options_mut(|options| options.max_passes = 1.try_into().unwrap());
+            Ok(Box::new(Demo::default()))
+        }),
     )
 }

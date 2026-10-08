@@ -243,11 +243,16 @@ impl eframe::App for App {
 
 ```
 
-The runtime supports repeated egui passes. Build and draw on every pass;
-callbacks and keyed canvas effects dispatch once per interaction per displayed
-frame. Effects are not rolled back if egui discards a pass. Applications should
-queue consequential actions and apply them after the host's pass loop. Scopes
-visited in any pass stay mounted until the following frame boundary.
+Configure the host for one egui pass per frame before drawing:
+
+```rust
+ctx.options_mut(|options| options.max_passes = 1.try_into().unwrap());
+```
+
+Call each runtime once per frame. Layout resolves within `show`; callbacks and
+deferred canvas effects run after the tree is drawn. `on_response` handles final
+geometry and continuous input as well as discrete interactions. Missing scopes
+unmount at the end of `show`, so keep persistent drafts in a stable parent scope.
 
 `Dgui` and `State<T>` support `Send + Sync`; stored values must satisfy both
 bounds. Frame closures can still borrow local data and need not be `Send`.

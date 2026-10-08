@@ -1,8 +1,6 @@
 //! Rendering traversal keeps native scroll containers nested so egui can route
 //! wheel input from the innermost viewport to its ancestors at scroll limits.
 
-use ahash::AHashSet as HashSet;
-
 use crate::{Align, Callback, Direction, FrameNode, Justify, Length, Overflow, Style, render};
 use egui::{Pos2, Rect};
 
@@ -37,7 +35,6 @@ pub struct Drawing<'a, 'frame> {
     pub layout: &'a mut taffy::TaffyTree<usize>,
     pub ids: &'a [taffy::NodeId],
     pub callbacks: &'a mut Vec<Callback<'frame>>,
-    pub dispatched: &'a mut HashSet<egui::Id>,
     #[cfg(test)]
     pub rectangles: Vec<(egui::Id, Rect)>,
 }
@@ -73,15 +70,7 @@ impl Drawing<'_, '_> {
         let node = &mut self.nodes[index];
         #[cfg(test)]
         self.rectangles.push((node.id, rect));
-        render(
-            host,
-            node,
-            rect,
-            content_rect,
-            clip,
-            self.callbacks,
-            self.dispatched,
-        );
+        render(host, node, rect, content_rect, clip, self.callbacks);
 
         let axes = [
             node.style.overflow_x == Overflow::Scroll,
