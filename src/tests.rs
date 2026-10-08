@@ -99,12 +99,12 @@ fn scoped_tasks_start_once_wake_and_pause_between_draws() {
     let started = Arc::new(AtomicUsize::new(0));
     let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let wake = Arc::new(std::sync::Mutex::new(None::<std::task::Waker>));
-    let mut counter = None;
+    let counter = Cell::new(None);
     let mut mount = || {
         run(&ctx, &mut gui, [100.0, 100.0], vec![], |ui| {
             ui.scope("wallet", |ui| {
                 let value = ui.state("value", || 0);
-                counter = Some(value);
+                counter.set(Some(value));
                 let started = started.clone();
                 let ready = ready.clone();
                 let wake = wake.clone();
@@ -132,10 +132,11 @@ fn scoped_tasks_start_once_wake_and_pause_between_draws() {
     ready.store(true, Ordering::Relaxed);
     wake.lock().unwrap().take().unwrap().wake();
     // Waking does not poll a minimized runtime.
+    assert_eq!(counter.get().unwrap().get(), 0);
     mount();
     mount();
     drop(mount);
-    assert_eq!(counter.unwrap().get(), 42);
+    assert_eq!(counter.get().unwrap().get(), 42);
     assert_eq!(started.load(Ordering::Relaxed), 1);
 }
 
