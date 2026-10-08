@@ -49,6 +49,7 @@ struct Build<'a> {
     context: egui::Context,
     nodes: Vec<FrameNode<'a>>,
     visited: HashSet<ScopePath>,
+    state_keys: HashSet<(u64, u64)>,
     ordinals: HashMap<ScopePath, u64>,
 }
 
@@ -129,15 +130,22 @@ impl<'frame> Ui<'_, 'frame> {
         children(&mut child);
     }
     /// Get state local to this keyed scope. Values live until the scope unmounts.
+    /// Declare each key once per scope per draw; pass its handle to share state.
+    /// Panics if a key is declared twice in the same scope during one draw.
+    #[track_caller]
     pub fn state<T: Send + Sync + 'static>(
         &mut self,
         key: impl Hash,
         init: impl FnOnce() -> T,
     ) -> State<T> {
-        self.scopes
-            .get_mut(&self.path)
-            .unwrap()
-            .state(hash(key), init)
+        let key = hash(key);
+        assert!(
+            self.build
+                .state_keys
+                .insert((self.scopes[&self.path].mount, key)),
+            "dgui: duplicate state key in the same scope during one draw; pass the State handle instead"
+        );
+        self.scopes.get_mut(&self.path).unwrap().state(key, init)
     }
     fn push(&mut self, frame: Frame<'frame>) -> usize {
         let ordinal = self.build.ordinals.entry(self.path.clone()).or_default();
@@ -260,6 +268,7 @@ impl Dgui {
                 accessibility_label: None,
             }],
             visited: HashSet::from([Vec::new()]),
+            state_keys: HashSet::new(),
             ordinals: HashMap::new(),
         };
         let content_style = scroll::content_style(&mut tree.nodes[0].style);

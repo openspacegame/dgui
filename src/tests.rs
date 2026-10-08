@@ -395,10 +395,43 @@ fn duplicate_scope_keys_fail_clearly() {
 #[test]
 #[should_panic(expected = "different type")]
 fn a_state_key_cannot_change_type() {
-    run(&context(), &mut Dgui::new(), [400.0, 300.0], vec![], |ui| {
+    let ctx = context();
+    let mut gui = Dgui::new();
+    run(&ctx, &mut gui, [400.0, 300.0], vec![], |ui| {
         ui.state("same", || 1);
+    });
+    run(&ctx, &mut gui, [400.0, 300.0], vec![], |ui| {
         ui.state("same", String::new);
     });
+}
+
+#[test]
+#[should_panic(expected = "duplicate state key")]
+fn duplicate_state_keys_across_layout_containers_fail_clearly() {
+    run(&context(), &mut Dgui::new(), [400.0, 300.0], vec![], |ui| {
+        ui.state("pending", || false);
+        ui.frame(Style::column(), |ui| {
+            ui.state("pending", || false);
+        });
+    });
+}
+
+#[test]
+fn state_keys_are_independent_between_scopes_and_reused_across_draws() {
+    let ctx = context();
+    let mut gui = Dgui::new();
+    for draw in 0..2 {
+        run(&ctx, &mut gui, [400.0, 300.0], vec![], |ui| {
+            let parent = ui.state("value", || 0);
+            assert_eq!(parent.get(), draw);
+            parent.update(|value| *value += 1);
+            ui.scope("child", |ui| {
+                let child = ui.state("value", || 10);
+                assert_eq!(child.get(), 10 + draw);
+                child.update(|value| *value += 1);
+            });
+        });
+    }
 }
 
 #[test]
