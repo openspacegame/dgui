@@ -291,22 +291,7 @@ impl Dgui {
                 },
                 |known, available, _, context, _| {
                     let node = &tree.nodes[context.copied().unwrap()];
-                    let input = MeasureInput {
-                        known: [known.width, known.height],
-                        available: [available.width, available.height].map(|space| match space {
-                            TaffyAvailableSpace::Definite(value) => AvailableSpace::Definite(value),
-                            TaffyAvailableSpace::MinContent => AvailableSpace::MinContent,
-                            TaffyAvailableSpace::MaxContent => AvailableSpace::MaxContent,
-                        }),
-                    };
-                    let natural = node
-                        .canvas
-                        .as_ref()
-                        .map_or([0.0; 2], |canvas| (canvas.measure)(host.ctx(), input));
-                    Size {
-                        width: known.width.unwrap_or(natural[0]),
-                        height: known.height.unwrap_or(natural[1]),
-                    }
+                    measure(node, host.ctx(), known, available)
                 },
             )
             .unwrap();
@@ -315,7 +300,9 @@ impl Dgui {
         let layouts: Vec<_> = ids.iter().map(|&id| *layout.layout(id).unwrap()).collect();
         let mut drawing = scroll::Drawing {
             nodes: &mut tree.nodes,
-            layouts: &layouts,
+            layouts,
+            layout: &mut layout,
+            ids: &ids,
             callbacks: &mut callbacks,
             dispatched: &mut self.dispatched,
             #[cfg(test)]
@@ -331,6 +318,30 @@ impl Dgui {
             callback();
         }
         self.visited.extend(tree.visited);
+    }
+}
+
+fn measure(
+    node: &FrameNode<'_>,
+    context: &egui::Context,
+    known: Size<Option<f32>>,
+    available: Size<TaffyAvailableSpace>,
+) -> Size<f32> {
+    let input = MeasureInput {
+        known: [known.width, known.height],
+        available: [available.width, available.height].map(|space| match space {
+            TaffyAvailableSpace::Definite(value) => AvailableSpace::Definite(value),
+            TaffyAvailableSpace::MinContent => AvailableSpace::MinContent,
+            TaffyAvailableSpace::MaxContent => AvailableSpace::MaxContent,
+        }),
+    };
+    let natural = node
+        .canvas
+        .as_ref()
+        .map_or([0.0; 2], |canvas| (canvas.measure)(context, input));
+    Size {
+        width: known.width.unwrap_or(natural[0]),
+        height: known.height.unwrap_or(natural[1]),
     }
 }
 
