@@ -27,8 +27,7 @@ Rebuilding everything every frame isn't *that* slow:
 
 dgui costs about 3× as much as plain egui, and a typical screen still takes
 microseconds. When you really do have thousands of rows, `Frame::virtual_list`
-builds only the visible ones. See [benchmarks/RESULTS.md](benchmarks/RESULTS.md)
-for methodology.
+builds only the visible ones.
 
 ## Example
 
