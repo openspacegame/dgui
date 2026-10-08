@@ -2,7 +2,10 @@ use super::*;
 use std::{
     cell::Cell,
     panic::{AssertUnwindSafe, catch_unwind},
-    rc::Rc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 fn context() -> egui::Context {
@@ -47,6 +50,154 @@ fn near(actual: f32, expected: f32) {
 }
 
 #[test]
+fn runtime_and_state_are_send_sync() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Dgui>();
+    assert_send_sync::<State<String>>();
+}
+
+#[test]
+fn state_updates_are_synchronized_across_threads() {
+    let ctx = context();
+    let mut gui = Dgui::new();
+    let mut handle = None;
+    run(&ctx, &mut gui, [100.0, 100.0], vec![], |ui| {
+        handle = Some(ui.state("counter", || 0));
+    });
+    let handle = handle.unwrap();
+    std::thread::scope(|scope| {
+        for _ in 0..4 {
+            scope.spawn(move || {
+                for _ in 0..100 {
+                    handle.update(|value| *value += 1);
+                }
+            });
+        }
+    });
+    assert_eq!(handle.get(), 400);
+}
+
+#[test]
+fn repeated_passes_dispatch_effects_once_and_accept_later_effects() {
+    let ctx = egui::Context::default();
+    ctx.options_mut(|options| options.max_passes = 3.try_into().unwrap());
+    let mut gui = Dgui::new();
+    let first = Cell::new(0);
+    let later = Cell::new(0);
+    let passes = Cell::new(0);
+    ctx.run_ui(egui::RawInput::default(), |host| {
+        let pass = host.ctx().current_pass_index();
+        passes.set(passes.get() + 1);
+        gui.show(host, |ui| {
+            ui.add(Frame::canvas(
+                |_, _| [20.0, 20.0],
+                |canvas| {
+                    canvas.defer_keyed("first", || first.set(first.get() + 1));
+                    if pass > 0 {
+                        canvas.defer_keyed("later", || later.set(later.get() + 1));
+                    }
+                },
+            ));
+        });
+        if pass < 2 {
+            host.ctx().request_discard("exercise runtime replay");
+        }
+    })
+    .drop_without_applying_deltas();
+    assert_eq!(passes.get(), 3);
+    assert_eq!(first.get(), 1);
+    assert_eq!(later.get(), 1);
+}
+
+#[test]
+fn repeated_passes_dispatch_pointer_click_once() {
+    let ctx = egui::Context::default();
+    ctx.options_mut(|options| options.max_passes = 2.try_into().unwrap());
+    let mut gui = Dgui::new();
+    let clicks = Cell::new(0);
+    let responses = Cell::new(0);
+    for events in [
+        vec![],
+        pointer(egui::pos2(10.0, 10.0), true),
+        pointer(egui::pos2(10.0, 10.0), false),
+    ] {
+        ctx.run_ui(
+            egui::RawInput {
+                events,
+                ..Default::default()
+            },
+            |host| {
+                gui.show(host, |ui| {
+                    ui.add(
+                        button("click")
+                            .on_click(|| clicks.set(clicks.get() + 1))
+                            .on_response(|response| {
+                                if response.clicked() {
+                                    responses.set(responses.get() + 1);
+                                }
+                            }),
+                    );
+                });
+                if host.ctx().current_pass_index() == 0 {
+                    host.ctx().request_discard("replay click");
+                }
+            },
+        )
+        .drop_without_applying_deltas();
+    }
+    assert_eq!(clicks.get(), 1);
+    assert_eq!(responses.get(), 1);
+}
+
+#[test]
+fn scope_absent_in_first_pass_survives_later_pass() {
+    let ctx = context();
+    let mut gui = Dgui::new();
+    let mut handle = None;
+    run(&ctx, &mut gui, [400.0, 300.0], vec![], |ui| {
+        ui.scope("conditional", |ui| handle = Some(ui.state("value", || 41)));
+    });
+    ctx.options_mut(|options| options.max_passes = 2.try_into().unwrap());
+    ctx.run_ui(egui::RawInput::default(), |host| {
+        let pass = host.ctx().current_pass_index();
+        gui.show(host, |ui| {
+            if pass == 1 {
+                ui.scope("conditional", |ui| {
+                    assert_eq!(ui.state("value", || 0).get(), 41);
+                });
+            }
+        });
+        if pass == 0 {
+            host.ctx().request_discard("discover conditional content");
+        }
+    })
+    .drop_without_applying_deltas();
+    assert_eq!(handle.unwrap().get(), 41);
+}
+
+#[test]
+fn disabled_container_disables_native_and_composed_descendants() {
+    let ctx = context();
+    let mut gui = Dgui::new();
+    let clicks = Cell::new(0);
+    for events in [
+        vec![],
+        pointer(egui::pos2(10.0, 10.0), true),
+        pointer(egui::pos2(10.0, 10.0), false),
+    ] {
+        run(&ctx, &mut gui, [400.0, 300.0], events, |ui| {
+            ui.add(Frame::new().enabled(false).children(|ui| {
+                ui.add(button("disabled").on_click(|| clicks.set(clicks.get() + 1)));
+                ui.add(Frame::egui_canvas([100.0, 30.0], |ui| {
+                    assert!(!ui.is_enabled())
+                }));
+            }));
+        });
+    }
+    assert_eq!(clicks.get(), 0);
+}
+
+#[test]
 fn state_is_copy_even_for_non_copy_values_and_initializes_once() {
     let ctx = context();
     let mut gui = Dgui::new();
@@ -70,15 +221,15 @@ fn state_is_copy_even_for_non_copy_values_and_initializes_once() {
 
 #[test]
 fn keyed_scopes_survive_reordering_and_release_values_on_unmount() {
-    struct DropCounter(Rc<Cell<usize>>);
+    struct DropCounter(Arc<AtomicUsize>);
     impl Drop for DropCounter {
         fn drop(&mut self) {
-            self.0.set(self.0.get() + 1);
+            self.0.fetch_add(1, Ordering::Relaxed);
         }
     }
     let ctx = context();
     let mut gui = Dgui::new();
-    let drops = Rc::new(Cell::new(0));
+    let drops = Arc::new(AtomicUsize::new(0));
     let mut handles = HashMap::new();
     for keys in [[1, 2], [2, 1]] {
         run(&ctx, &mut gui, [400.0, 300.0], vec![], |ui| {
@@ -94,12 +245,16 @@ fn keyed_scopes_survive_reordering_and_release_values_on_unmount() {
     }
     assert_eq!(handles[&1].get(), 12);
     assert_eq!(handles[&2].get(), 22);
-    assert_eq!(drops.get(), 0);
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
     let stale = handles[&2];
     run(&ctx, &mut gui, [400.0, 300.0], vec![], |ui| {
         ui.scope(1, |_| {})
     });
-    assert_eq!(drops.get(), 1);
+    // Unmount waits for the frame boundary so subsequent passes can revisit it.
+    run(&ctx, &mut gui, [400.0, 300.0], vec![], |ui| {
+        ui.scope(1, |_| {})
+    });
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
     assert!(stale.0.try_read().is_err());
     assert_eq!(handles[&1].get(), 12);
     run(&ctx, &mut gui, [400.0, 300.0], vec![], |ui| {
@@ -108,7 +263,7 @@ fn keyed_scopes_survive_reordering_and_release_values_on_unmount() {
     });
     assert!(stale.0.try_read().is_err());
     drop(gui);
-    assert_eq!(drops.get(), 2);
+    assert_eq!(drops.load(Ordering::Relaxed), 2);
     assert!(handles[&1].0.try_read().is_err());
 }
 

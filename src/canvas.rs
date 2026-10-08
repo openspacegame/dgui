@@ -38,11 +38,25 @@ pub struct Canvas<'a, 'frame> {
     pub(crate) content_response: Option<egui::Response>,
     pub(crate) frame_clip: egui::Rect,
     pub(crate) callbacks: &'a mut Vec<Callback<'frame>>,
+    pub(crate) dispatched: &'a mut ahash::AHashSet<egui::Id>,
+    pub(crate) deferred_ordinal: u64,
 }
 impl<'frame> Canvas<'_, 'frame> {
     /// Queue application effects until the entire tree has been drawn.
     pub fn defer(&mut self, callback: impl FnOnce() + 'frame) {
-        self.callbacks.push(Box::new(callback));
+        let ordinal = self.deferred_ordinal;
+        self.deferred_ordinal += 1;
+        self.defer_keyed(ordinal, callback);
+    }
+    /// Queue an effect with a stable local identity, at most once per displayed
+    /// frame. Use explicit keys when conditional branches queue distinct effects.
+    pub fn defer_keyed(&mut self, key: impl std::hash::Hash, callback: impl FnOnce() + 'frame) {
+        if self
+            .dispatched
+            .insert(self.id.with(("defer", crate::hash(key))))
+        {
+            self.callbacks.push(Box::new(callback));
+        }
     }
     /// The common frame interaction. Configure it with Frame's event methods.
     pub fn response(&self) -> &egui::Response {

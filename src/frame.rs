@@ -1,5 +1,7 @@
 use crate::canvas::CanvasContent;
-use crate::{Align, Callback, Canvas, Color, Direction, Justify, Length, MeasureInput, Style, Ui};
+use crate::{
+    Align, Callback, Canvas, Color, Direction, Justify, Length, MeasureInput, Overflow, Style, Ui,
+};
 
 type Children<'a> = Box<dyn FnOnce(&mut Ui<'_, 'a>) + 'a>;
 
@@ -13,6 +15,9 @@ pub struct Frame<'a> {
     pub(crate) events: Events<'a>,
     pub(crate) clickable: bool,
     pub(crate) focusable: bool,
+    pub(crate) disabled: bool,
+    pub(crate) sense: Option<egui::Sense>,
+    pub(crate) accessibility_label: Option<String>,
 }
 #[derive(Default)]
 pub(crate) struct Events<'a> {
@@ -20,6 +25,7 @@ pub(crate) struct Events<'a> {
     pub hover: Option<Callback<'a>>,
     pub focus: Option<Callback<'a>>,
     pub blur: Option<Callback<'a>>,
+    pub response: Option<Box<dyn FnOnce(egui::Response) + 'a>>,
 }
 
 macro_rules! setters {
@@ -67,6 +73,7 @@ impl<'a> Frame<'a> {
     }
     setters! { direction: Direction, wrap: bool, gap: f32, padding: f32, margin: f32,
     grow: f32, shrink: f32, align: Align, justify: Justify, corner_radius: u8,
+    overflow_x: Overflow, overflow_y: Overflow,
     background: Color, hover_background: Color, active_background: Color, focus_background: Color }
     lengths! { width, height, min_width, min_height, max_width, max_height }
     pub fn border(mut self, width: f32, color: Color) -> Self {
@@ -100,6 +107,28 @@ impl<'a> Frame<'a> {
     /// Native canvas controls such as text editors manage their own focus.
     pub fn focusable(mut self, value: bool) -> Self {
         self.focusable = value;
+        self
+    }
+    /// Disable interaction for this frame and its descendants.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.disabled = !enabled;
+        self
+    }
+    /// Additional pointer interaction, such as dragging, for this frame.
+    pub fn sense(mut self, sense: egui::Sense) -> Self {
+        self.sense = Some(sense);
+        self
+    }
+    /// Describe a composed control to accessibility tools.
+    pub fn accessibility_label(mut self, label: impl Into<String>) -> Self {
+        self.accessibility_label = Some(label.into());
+        self
+    }
+    /// Observe the combined frame/native response after drawing.
+    /// Repeated passes dispatch once per distinct interaction state in a frame,
+    /// so a click first discovered in a later pass is still delivered.
+    pub fn on_response(mut self, callback: impl FnOnce(egui::Response) + 'a) -> Self {
+        self.events.response = Some(Box::new(callback));
         self
     }
 }

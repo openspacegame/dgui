@@ -1,26 +1,28 @@
 //! A GUI built from a fresh frame tree on every render cycle.
 //!
 //! See the `demo` example for keyed components and Copy state handles.
-//! Configure the host for one egui pass per render cycle. Call [`Dgui::show`]
-//! once per runtime per cycle; callbacks execute after its tree is painted.
+//! Call [`Dgui::show`] once per runtime per egui pass. The tree is rebuilt on
+//! repeated passes; interaction effects are dispatched once per displayed frame.
 
 mod builtins;
 mod canvas;
 mod frame;
+mod scroll;
 mod state;
 mod style;
+mod virtual_list;
 pub use builtins::{button, text_input};
 pub use canvas::{AvailableSpace, Canvas, MeasureInput};
 use frame::Events;
 pub use frame::Frame;
 pub use state::State;
-pub use style::{Align, Color, Direction, Justify, Length, Style};
+pub use style::{Align, Color, Direction, Justify, Length, Overflow, Style};
 
+use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use canvas::CanvasContent;
 use egui::Rect;
 use state::Scope;
 use std::{
-    collections::{HashMap, HashSet},
     hash::{Hash, Hasher},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -31,13 +33,15 @@ type ScopePath = Vec<u64>;
 
 struct FrameNode<'a> {
     id: egui::Id,
-    parent: Option<usize>,
     children: Vec<usize>,
     style: Style,
     canvas: Option<CanvasContent<'a>>,
     events: Events<'a>,
     clickable: bool,
     focusable: bool,
+    enabled: bool,
+    sense: Option<egui::Sense>,
+    accessibility_label: Option<String>,
 }
 struct Build<'a> {
     nodes: Vec<FrameNode<'a>>,
@@ -58,7 +62,7 @@ pub struct Ui<'a, 'frame> {
 impl<'frame> Ui<'_, 'frame> {
     /// Shorthand for adding a container frame in the current state scope.
     pub fn frame(&mut self, style: Style, children: impl FnOnce(&mut Ui<'_, 'frame>)) {
-        let parent = self.push(Frame::new().style(style));
+        let parent = self.push_container(Frame::new().style(style));
         children(&mut Ui {
             build: self.build,
             scopes: self.scopes,
@@ -71,7 +75,11 @@ impl<'frame> Ui<'_, 'frame> {
     /// Add a frame, constructing its children now, before layout or interaction.
     pub fn add(&mut self, mut frame: Frame<'frame>) {
         let children = frame.children.take();
-        let parent = self.push(frame);
+        let parent = if children.is_some() {
+            self.push_container(frame)
+        } else {
+            self.push(frame)
+        };
         if let Some(children) = children {
             children(&mut Ui {
                 build: self.build,
@@ -85,7 +93,8 @@ impl<'frame> Ui<'_, 'frame> {
     }
 
     /// Enter a keyed component scope without adding a layout frame.
-    /// Sibling keys must be unique. Missing scopes unmount at the end of `show`.
+    /// Sibling keys must be unique. Missing scopes unmount at the next frame
+    /// boundary, after all passes have had the opportunity to visit them.
     pub fn scope(&mut self, key: impl Hash, children: impl FnOnce(&mut Ui<'_, 'frame>)) {
         let mut path = self.path.clone();
         path.push(hash(key));
@@ -108,7 +117,11 @@ impl<'frame> Ui<'_, 'frame> {
         children(&mut child);
     }
     /// Get state local to this keyed scope. Values live until the scope unmounts.
-    pub fn state<T: 'static>(&mut self, key: impl Hash, init: impl FnOnce() -> T) -> State<T> {
+    pub fn state<T: Send + Sync + 'static>(
+        &mut self,
+        key: impl Hash,
+        init: impl FnOnce() -> T,
+    ) -> State<T> {
         self.scopes
             .get_mut(&self.path)
             .unwrap()
@@ -121,16 +134,30 @@ impl<'frame> Ui<'_, 'frame> {
         let index = self.build.nodes.len();
         self.build.nodes.push(FrameNode {
             id,
-            parent: Some(self.parent),
             children: Vec::new(),
             style: frame.style,
             canvas: frame.canvas,
             events: frame.events,
             clickable: frame.clickable,
             focusable: frame.focusable,
+            enabled: self.build.nodes[self.parent].enabled && !frame.disabled,
+            sense: frame.sense,
+            accessibility_label: frame.accessibility_label,
         });
         self.build.nodes[self.parent].children.push(index);
         index
+    }
+
+    fn push_container(&mut self, mut frame: Frame<'frame>) -> usize {
+        let Some(content) = scroll::content_style(&mut frame.style) else {
+            return self.push(frame);
+        };
+        let outer = self.push(frame);
+        let previous = self.parent;
+        self.parent = outer;
+        let inner = self.push(Frame::new().style(content));
+        self.parent = previous;
+        inner
     }
 }
 fn hash(key: impl Hash) -> u64 {
@@ -145,7 +172,9 @@ pub struct Dgui {
     id: u64,
     next_mount: u64,
     scopes: HashMap<ScopePath, Scope>,
-    layout: TaffyTree<usize>,
+    frame: Option<(egui::ViewportId, u64)>,
+    visited: HashSet<ScopePath>,
+    dispatched: HashSet<egui::Id>,
     #[cfg(test)]
     last_layout: Vec<(egui::Id, Rect)>,
 }
@@ -156,7 +185,9 @@ impl Default for Dgui {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             next_mount: 0,
             scopes: HashMap::from([(Vec::new(), Scope::new(0))]),
-            layout: TaffyTree::new(),
+            frame: None,
+            visited: HashSet::new(),
+            dispatched: HashSet::new(),
             #[cfg(test)]
             last_layout: Vec::new(),
         }
@@ -167,15 +198,38 @@ impl Dgui {
         Self::default()
     }
 
-    /// Build, lay out, draw, dispatch callbacks, then unmount absent scopes.
+    /// Build, lay out, draw, and dispatch callbacks.
     /// The root fills the host's available rectangle. Use a finite host rectangle.
-    /// Configure `egui::Options::max_passes` to one to avoid replaying callbacks.
+    /// A runtime belongs to one viewport. Repeated egui passes rebuild the tree
+    /// without replaying interaction effects. Effects are not rolled back when
+    /// egui discards a pass; defer consequential host actions to its pass boundary.
     pub fn show<'frame>(&mut self, host: &mut egui::Ui, build: impl FnOnce(&mut Ui<'_, 'frame>)) {
-        assert_eq!(
-            host.ctx().options(|o| o.max_passes.get()),
-            1,
-            "dgui requires egui Options::max_passes = 1"
+        self.show_styled(
+            host,
+            Style::column()
+                .width(Length::Percent(1.0))
+                .height(Length::Percent(1.0)),
+            build,
         );
+    }
+
+    /// Build a root with declarative sizing. Auto height follows its content;
+    /// percentage dimensions fill the corresponding available host dimension.
+    pub fn show_styled<'frame>(
+        &mut self,
+        host: &mut egui::Ui,
+        style: Style,
+        build: impl FnOnce(&mut Ui<'_, 'frame>),
+    ) {
+        let frame = (host.ctx().viewport_id(), host.ctx().cumulative_frame_nr());
+        if self.frame != Some(frame) {
+            if self.frame.is_some() {
+                self.scopes.retain(|path, _| self.visited.contains(path));
+            }
+            self.visited.clear();
+            self.dispatched.clear();
+            self.frame = Some(frame);
+        }
         let root_rect = host.available_rect_before_wrap();
         assert!(
             root_rect.is_finite(),
@@ -184,44 +238,51 @@ impl Dgui {
         let mut tree = Build {
             nodes: vec![FrameNode {
                 id: egui::Id::new((self.id, "root")),
-                parent: None,
                 children: Vec::new(),
-                style: Style::column()
-                    .width(root_rect.width())
-                    .height(root_rect.height()),
+                style,
                 canvas: None,
                 events: Events::default(),
                 clickable: false,
                 focusable: false,
+                enabled: host.is_enabled(),
+                sense: None,
+                accessibility_label: None,
             }],
             visited: HashSet::from([Vec::new()]),
             ordinals: HashMap::new(),
         };
-        build(&mut Ui {
+        let content_style = scroll::content_style(&mut tree.nodes[0].style);
+        let mut builder = Ui {
             build: &mut tree,
             scopes: &mut self.scopes,
             next_mount: &mut self.next_mount,
             runtime_id: self.id,
             path: Vec::new(),
             parent: 0,
-        });
+        };
+        if let Some(style) = content_style {
+            builder.parent = builder.push(Frame::new().style(style));
+        }
+        build(&mut builder);
 
-        self.layout.clear();
+        // Taffy owns transient layout nodes and does not implement Send. Keep
+        // it local while persistent component state remains thread-safe.
+        let mut layout = TaffyTree::new();
         let ids: Vec<_> = tree
             .nodes
             .iter()
             .enumerate()
             .map(|(index, node)| {
-                self.layout
+                layout
                     .new_leaf_with_context(node.style.taffy(), index)
                     .unwrap()
             })
             .collect();
         for (index, node) in tree.nodes.iter().enumerate() {
             let children: Vec<_> = node.children.iter().map(|&child| ids[child]).collect();
-            self.layout.set_children(ids[index], &children).unwrap();
+            layout.set_children(ids[index], &children).unwrap();
         }
-        self.layout
+        layout
             .compute_layout_with_measure(
                 ids[0],
                 Size {
@@ -250,51 +311,26 @@ impl Dgui {
             )
             .unwrap();
 
-        let mut geometry: Vec<(Rect, Rect)> = Vec::with_capacity(tree.nodes.len());
         let mut callbacks: Vec<Callback<'frame>> = Vec::new();
-        #[cfg(test)]
-        self.last_layout.clear();
-        for (index, node) in tree.nodes.iter_mut().enumerate() {
-            let layout = self.layout.layout(ids[index]).unwrap();
-            let (origin, parent_clip) = node
-                .parent
-                .map_or((root_rect.min, host.clip_rect()), |parent| {
-                    (geometry[parent].0.min, geometry[parent].1)
-                });
-            let rect = Rect::from_min_size(
-                origin + egui::vec2(layout.location.x, layout.location.y),
-                egui::vec2(layout.size.width, layout.size.height),
-            );
-            let clip = parent_clip.intersect(rect);
-            geometry.push((rect, clip));
+        let layouts: Vec<_> = ids.iter().map(|&id| *layout.layout(id).unwrap()).collect();
+        let mut drawing = scroll::Drawing {
+            nodes: &mut tree.nodes,
+            layouts: &layouts,
+            callbacks: &mut callbacks,
+            dispatched: &mut self.dispatched,
             #[cfg(test)]
-            self.last_layout.push((node.id, rect));
-            let content_rect = Rect::from_min_max(
-                rect.min
-                    + egui::vec2(
-                        layout.padding.left + layout.border.left,
-                        layout.padding.top + layout.border.top,
-                    ),
-                (rect.max
-                    - egui::vec2(
-                        layout.padding.right + layout.border.right,
-                        layout.padding.bottom + layout.border.bottom,
-                    ))
-                .max(
-                    rect.min
-                        + egui::vec2(
-                            layout.padding.left + layout.border.left,
-                            layout.padding.top + layout.border.top,
-                        ),
-                ),
-            );
-            render(host, node, rect, content_rect, clip, &mut callbacks);
+            rectangles: Vec::new(),
+        };
+        let painted_root = drawing.draw(host, 0, root_rect.min, host.clip_rect());
+        #[cfg(test)]
+        {
+            self.last_layout = drawing.rectangles;
         }
-        host.advance_cursor_after_rect(root_rect);
+        host.advance_cursor_after_rect(painted_root);
         for callback in callbacks {
             callback();
         }
-        self.scopes.retain(|path, _| tree.visited.contains(path));
+        self.visited.extend(tree.visited);
     }
 }
 
@@ -305,6 +341,7 @@ fn render<'a>(
     content_rect: Rect,
     clip: Rect,
     callbacks: &mut Vec<Callback<'a>>,
+    dispatched: &mut HashSet<egui::Id>,
 ) {
     let mut ui = host.new_child(
         egui::UiBuilder::new()
@@ -313,7 +350,10 @@ fn render<'a>(
             .layout(egui::Layout::top_down(egui::Align::Min)),
     );
     ui.set_clip_rect(clip);
-    let mut sense = egui::Sense::hover();
+    if !node.enabled {
+        ui.disable();
+    }
+    let mut sense = node.sense.unwrap_or_else(egui::Sense::hover);
     if node.events.click.is_some() || node.clickable || node.focusable {
         sense |= egui::Sense::CLICK;
     }
@@ -321,6 +361,11 @@ fn render<'a>(
         sense |= egui::Sense::FOCUSABLE;
     }
     let response = ui.interact(rect, node.id.with("frame"), sense);
+    if let Some(label) = &node.accessibility_label {
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Other, node.enabled, label)
+        });
+    }
     let native_previous = host.ctx().read_response(node.id);
     let hovered = response.hovered() || native_previous.as_ref().is_some_and(|r| r.hovered());
     let focused = response.has_focus() || native_previous.as_ref().is_some_and(|r| r.has_focus());
@@ -359,6 +404,8 @@ fn render<'a>(
         callbacks,
         response: response.clone(),
         content_response: None,
+        dispatched,
+        deferred_ordinal: 0,
     };
     if let Some(canvas) = &mut node.canvas
         && let Some(paint) = canvas.paint.take()
@@ -372,15 +419,64 @@ fn render<'a>(
         response.gained_focus() || content_response.as_ref().is_some_and(|r| r.gained_focus());
     let lost_focus =
         response.lost_focus() || content_response.as_ref().is_some_and(|r| r.lost_focus());
-    for (triggered, callback) in [
+    let combined = content_response.map_or_else(
+        || response.clone(),
+        |content| response.clone().union(content),
+    );
+    for (event, (triggered, callback)) in [
         (clicked, &mut node.events.click),
         (hovered, &mut node.events.hover),
         (gained_focus, &mut node.events.focus),
         (lost_focus, &mut node.events.blur),
-    ] {
-        if triggered && let Some(callback) = callback.take() {
-            callbacks.push(callback);
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if triggered
+            && node.enabled
+            && callback.is_some()
+            && canvas_context
+                .dispatched
+                .insert(node.id.with(("event", event)))
+            && let Some(callback) = callback.take()
+        {
+            canvas_context.callbacks.push(callback);
         }
+    }
+    if let Some(callback) = node.events.response.take() {
+        let state = response_state(&combined);
+        if canvas_context
+            .dispatched
+            .insert(node.id.with(("response", state)))
+        {
+            canvas_context
+                .callbacks
+                .push(Box::new(move || callback(combined)));
+        }
+    }
+}
+
+fn response_state(response: &egui::Response) -> u16 {
+    // A click can acquire hover/focus flags in a later layout pass. Those
+    // secondary changes must not replay the same click handler.
+    if response.clicked() || response.secondary_clicked() || response.middle_clicked() {
+        1
+    } else if response.drag_stopped() {
+        2
+    } else if response.drag_started() {
+        3
+    } else if response.dragged() {
+        4
+    } else if response.changed() {
+        5
+    } else if response.gained_focus() {
+        6
+    } else if response.lost_focus() {
+        7
+    } else if response.hovered() {
+        8
+    } else {
+        0
     }
 }
 

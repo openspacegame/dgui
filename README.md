@@ -241,14 +241,31 @@ impl eframe::App for App {
     }
 }
 
-// dgui does its own layout, so egui must run exactly one pass per frame:
-cc.egui_ctx.options_mut(|o| o.max_passes = 1.try_into().unwrap());
 ```
+
+The runtime supports repeated egui passes. Build and draw on every pass;
+callbacks and keyed canvas effects dispatch once per interaction per displayed
+frame. Effects are not rolled back if egui discards a pass. Applications should
+queue consequential actions and apply them after the host's pass loop. Scopes
+visited in any pass stay mounted until the following frame boundary.
+
+`Dgui` and `State<T>` support `Send + Sync`; stored values must satisfy both
+bounds. Frame closures can still borrow local data and need not be `Send`.
 
 The root frame fills the host's available rectangle as a column. See
 [`examples/demo.rs`](examples/demo.rs) for a complete app with wrapping cards,
 keyed state that follows reordering, mounting and unmounting, and an animated,
 clickable canvas.
+
+For content-sized roots, call `show_styled(host, Style::column()
+.width(Length::Percent(1.0)), build)`. The runtime determines the automatic
+height from the contents. Add `.overflow_y(Overflow::Scroll)` to a bounded
+frame to give it a scrolling viewport; children keep their natural size,
+and nested scroll containers route wheel input through egui.
+
+`Frame::virtual_list(count, row_height, key, build_row)` uses that same frame
+model for large lists. Only visible rows and two rows of overscan are built.
+Keep selection and drafts in application data because offscreen rows unmount.
 
 ## Good to know
 
@@ -267,10 +284,12 @@ clickable canvas.
 
 ## Status
 
-dgui is an early prototype. It targets native desktop and currently has no
-scrolling, multiline text input, virtualization, animation API, gamepad
-navigation, or per-element font sizes (text is a fixed 16px). None of its
-performance has been benchmarked yet.
+dgui is an early prototype targeting native desktop. It includes declarative
+scrolling, fixed-height virtualization, inherited disabled state, and frame
+response hooks. Multiline editors, application typography, and specialized
+graphics can use native canvas leaves. It has no animation or gamepad navigation
+API; the convenience text constructor uses a fixed 16px font. Its performance
+has not been benchmarked yet.
 
 ```sh
 cargo test

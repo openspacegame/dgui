@@ -42,6 +42,14 @@ pub enum Justify {
     SpaceEvenly,
 }
 
+/// How a bounded frame presents content exceeding its viewport.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Overflow {
+    #[default]
+    Hidden,
+    Scroll,
+}
+
 /// An sRGB color with unmultiplied alpha.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Color(pub u8, pub u8, pub u8, pub u8);
@@ -59,6 +67,8 @@ impl Color {
 /// Size constraints include padding. Overflow is clipped to the frame.
 #[derive(Clone, Debug)]
 pub struct Style {
+    pub overflow_x: Overflow,
+    pub overflow_y: Overflow,
     pub direction: Direction,
     pub wrap: bool,
     pub gap: f32,
@@ -86,6 +96,8 @@ pub struct Style {
 impl Default for Style {
     fn default() -> Self {
         Self {
+            overflow_x: Overflow::Hidden,
+            overflow_y: Overflow::Hidden,
             direction: Direction::Column,
             wrap: false,
             gap: 0.0,
@@ -129,7 +141,8 @@ impl Style {
         Self::default()
     }
     setters! { direction: Direction, wrap: bool, gap: f32, padding: f32, margin: f32,
-    grow: f32, shrink: f32, align: Align, justify: Justify, corner_radius: u8 }
+    grow: f32, shrink: f32, align: Align, justify: Justify, corner_radius: u8,
+    overflow_x: Overflow, overflow_y: Overflow }
     pub fn background(mut self, color: Color) -> Self {
         self.background = Some(color);
         self

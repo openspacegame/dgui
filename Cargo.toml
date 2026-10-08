@@ -6,6 +6,7 @@ description = "A transient frame tree GUI with flex layout and keyed state"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+ahash = "0.8"
 egui = "0.36"
 taffy = "0.9"
 generational-box = "0.7"
