@@ -150,6 +150,46 @@ fn repeated_passes_dispatch_pointer_click_once() {
 }
 
 #[test]
+fn layout_observers_run_on_every_pass_with_current_bounds_and_held_state() {
+    let ctx = egui::Context::default();
+    ctx.options_mut(|options| options.max_passes = 2.try_into().unwrap());
+    let mut gui = Dgui::new();
+    let observations = std::cell::RefCell::new(Vec::new());
+    for events in [vec![], pointer(egui::pos2(10.0, 10.0), true)] {
+        observations.borrow_mut().clear();
+        ctx.run_ui(
+            egui::RawInput {
+                events,
+                ..Default::default()
+            },
+            |host| {
+                let pass = host.ctx().current_pass_index();
+                gui.show(host, |ui| {
+                    ui.add(
+                        Frame::new()
+                            .width(100.0 + pass as f32 * 20.0)
+                            .height(30.0)
+                            .clickable(true)
+                            .on_layout(|response| {
+                                observations.borrow_mut().push((
+                                    response.rect.width(),
+                                    response.is_pointer_button_down_on(),
+                                ))
+                            }),
+                    );
+                });
+                if pass == 0 {
+                    host.ctx()
+                        .request_discard("recollect bounds and held input");
+                }
+            },
+        )
+        .drop_without_applying_deltas();
+    }
+    assert_eq!(&*observations.borrow(), &[(100.0, true), (120.0, true)]);
+}
+
+#[test]
 fn scope_absent_in_first_pass_survives_later_pass() {
     let ctx = context();
     let mut gui = Dgui::new();

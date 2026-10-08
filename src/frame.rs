@@ -4,6 +4,7 @@ use crate::{
 };
 
 type Children<'a> = Box<dyn FnOnce(&mut Ui<'_, 'a>) + 'a>;
+type LayoutObserver<'a> = Box<dyn FnOnce(&egui::Response) + 'a>;
 
 /// The single element type: containers, text, editors, buttons, and canvases
 /// all have the same styling and event methods. Children build when added to Ui.
@@ -26,6 +27,7 @@ pub(crate) struct Events<'a> {
     pub focus: Option<Callback<'a>>,
     pub blur: Option<Callback<'a>>,
     pub response: Option<Box<dyn FnOnce(egui::Response) + 'a>>,
+    pub layout: Option<LayoutObserver<'a>>,
 }
 
 macro_rules! setters {
@@ -129,6 +131,16 @@ impl<'a> Frame<'a> {
     /// so a click first discovered in a later pass is still delivered.
     pub fn on_response(mut self, callback: impl FnOnce(egui::Response) + 'a) -> Self {
         self.events.response = Some(Box::new(callback));
+        self
+    }
+    /// Observe resolved geometry and continuous interaction state on every pass.
+    ///
+    /// Runs during drawing after native content has reported its response. Use
+    /// this to collect bounds, hover, or held-input state that is rebuilt each
+    /// pass. Discrete actions belong in `on_click` or `on_response`, whose
+    /// effects are deduplicated across repeated passes.
+    pub fn on_layout(mut self, callback: impl FnOnce(&egui::Response) + 'a) -> Self {
+        self.events.layout = Some(Box::new(callback));
         self
     }
 }

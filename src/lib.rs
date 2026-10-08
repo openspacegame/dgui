@@ -423,6 +423,9 @@ fn render<'a>(
         || response.clone(),
         |content| response.clone().union(content),
     );
+    if let Some(observe) = node.events.layout.take() {
+        observe(&combined);
+    }
     for (event, (triggered, callback)) in [
         (clicked, &mut node.events.click),
         (hovered, &mut node.events.hover),
