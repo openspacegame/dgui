@@ -268,6 +268,11 @@ impl Dgui {
         // Taffy owns transient layout nodes and does not implement Send. Keep
         // it local while persistent component state remains thread-safe.
         let mut layout = TaffyTree::new();
+        // Layout uses egui points, which can cover fractional physical pixels.
+        // Rounding here can narrow an intrinsically measured text leaf enough
+        // to wrap another line after its height has already been determined.
+        // Preserve point geometry; egui handles physical-pixel rasterization.
+        layout.disable_rounding();
         let ids: Vec<_> = tree
             .nodes
             .iter()

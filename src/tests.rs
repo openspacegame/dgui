@@ -45,6 +45,40 @@ fn pointer(pos: egui::Pos2, pressed: bool) -> Vec<egui::Event> {
         },
     ]
 }
+
+#[test]
+fn fractional_intrinsic_extents_reach_canvas_without_logical_pixel_rounding() {
+    for pixels_per_point in [1.0, 1.25, 2.0] {
+        let ctx = context();
+        ctx.set_pixels_per_point(pixels_per_point);
+        let mut gui = Dgui::new();
+        let content_size = Cell::new(egui::Vec2::ZERO);
+        run(&ctx, &mut gui, [300.0, 200.0], vec![], |ui| {
+            ui.add(
+                Frame::new()
+                    .padding(6.25)
+                    .align(Align::Start)
+                    .children(|ui| {
+                        ui.add(Frame::canvas(
+                            |_, _| [26.8, 18.4],
+                            |canvas| content_size.set(canvas.content_rect.size()),
+                        ));
+                    }),
+            );
+        });
+        let size = content_size.get();
+        // A text canvas lays out again at the resolved width. Reducing even a
+        // fraction of a point can introduce an extra line after height layout.
+        assert!(
+            (size.x - 26.8).abs() < 0.0001,
+            "{pixels_per_point}: {size:?}"
+        );
+        assert!(
+            (size.y - 18.4).abs() < 0.0001,
+            "{pixels_per_point}: {size:?}"
+        );
+    }
+}
 fn near(actual: f32, expected: f32) {
     assert!((actual - expected).abs() < 1.1, "{actual} != {expected}");
 }
