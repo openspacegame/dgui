@@ -21,6 +21,9 @@ pub fn content_style(viewport: &mut Style) -> Option<Style> {
     if viewport.overflow_x == Overflow::Hidden {
         content.width = Length::Percent(1.0);
     }
+    if viewport.overflow_y == Overflow::Hidden {
+        content.height = Length::Percent(1.0);
+    }
     viewport.direction = Direction::Column;
     viewport.gap = 0.0;
     viewport.justify = Justify::Start;
@@ -261,6 +264,44 @@ mod tests {
         });
         assert_eq!(gui.last_layout[1].1.width(), 100.0);
         assert_eq!(gui.last_layout[2].1.width(), 600.0);
+    }
+
+    #[test]
+    fn horizontal_scroll_preserves_height_for_nested_virtual_list() {
+        let mut gui = Dgui::new();
+        let visible_rows = std::cell::Cell::new(0);
+        run(&mut gui, Style::column().width(200.0).height(300.0), |ui| {
+            ui.frame(
+                Style::column().grow(1.0).overflow_x(Overflow::Scroll),
+                |ui| {
+                    ui.add(Frame::new().width(600.0).height(32.0).shrink(0.0));
+                    ui.add(Frame::virtual_list(
+                        20,
+                        32.0,
+                        |index| index,
+                        |ui, _| {
+                            ui.add(Frame::canvas(
+                                |_, input| [input.width(), 32.0],
+                                |canvas| {
+                                    if canvas
+                                        .content_rect
+                                        .intersect(canvas.ui.clip_rect())
+                                        .is_positive()
+                                    {
+                                        visible_rows.set(visible_rows.get() + 1);
+                                    }
+                                },
+                            ));
+                        },
+                    ));
+                },
+            );
+        });
+        assert!(
+            visible_rows.get() >= 7,
+            "only {} rows are visible",
+            visible_rows.get()
+        );
     }
 
     #[test]
