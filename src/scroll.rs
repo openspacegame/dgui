@@ -18,6 +18,8 @@ pub fn content_style(viewport: &mut Style) -> Option<Style> {
         .shrink(0.0);
     if viewport.overflow_x == Overflow::Hidden {
         content.width = Length::Percent(1.0);
+    } else {
+        content.min_width = Length::Percent(1.0);
     }
     if viewport.overflow_y == Overflow::Hidden {
         content.height = Length::Percent(1.0);
@@ -113,6 +115,16 @@ impl Drawing<'_, '_> {
         use taffy::{AvailableSpace, Size};
 
         let available = host.available_size_before_wrap();
+        if axes[0] {
+            // The initial layout already established the intrinsic extent.
+            // Resolve a concrete width here so percentage-width children can
+            // share a wider viewport while retaining horizontal overflow.
+            let id = self.ids[root];
+            let mut style = self.layout.style(id).unwrap().clone();
+            style.size.width =
+                taffy::Dimension::length(self.layouts[root].size.width.max(available.x));
+            self.layout.set_style(id, style).unwrap();
+        }
         let space = |scrolling, size| {
             if scrolling {
                 AvailableSpace::MaxContent
@@ -253,6 +265,34 @@ mod tests {
         });
         assert_eq!(gui.last_layout[1].1.width(), 100.0);
         assert_eq!(gui.last_layout[2].1.width(), 600.0);
+    }
+
+    #[test]
+    fn horizontal_scroll_fills_viewport_and_preserves_column_minimums() {
+        for width in [100.0, 320.0] {
+            let mut gui = Dgui::new();
+            run(&mut gui, Style::column().width(width).height(100.0), |ui| {
+                ui.frame(
+                    Style::column()
+                        .width(Length::Percent(1.0))
+                        .height(100.0)
+                        .overflow_x(Overflow::Scroll),
+                    |ui| {
+                        ui.frame(
+                            Style::row()
+                                .width(Length::Percent(1.0))
+                                .min_width(200.0)
+                                .height(24.0),
+                            |ui| {
+                                ui.add(Frame::new().width(100.0).shrink(0.0));
+                                ui.add(Frame::new().min_width(100.0).grow(1.0));
+                            },
+                        );
+                    },
+                );
+            });
+            assert_eq!(gui.last_layout[3].1.width(), width.max(200.0));
+        }
     }
 
     #[test]
