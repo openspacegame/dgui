@@ -132,23 +132,16 @@ impl Drawing<'_, '_> {
                 AvailableSpace::Definite(size)
             }
         };
-        self.layout
-            .compute_layout_with_measure(
-                self.ids[root],
-                Size {
-                    width: space(axes[0], available.x),
-                    height: space(axes[1], available.y),
-                },
-                |known, available, _, context, _| {
-                    crate::measure(
-                        &self.nodes[context.copied().unwrap()],
-                        host.ctx(),
-                        known,
-                        available,
-                    )
-                },
-            )
-            .unwrap();
+        crate::compute_layout(
+            self.layout,
+            self.ids[root],
+            Size {
+                width: space(axes[0], available.x),
+                height: space(axes[1], available.y),
+            },
+            self.nodes,
+            host.ctx(),
+        );
         let mut pending = vec![root];
         while let Some(index) = pending.pop() {
             self.layouts[index] = *self.layout.layout(self.ids[index]).unwrap();

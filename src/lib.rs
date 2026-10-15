@@ -451,19 +451,16 @@ impl Dgui {
             let children: Vec<_> = node.children.iter().map(|&child| ids[child]).collect();
             layout.set_children(ids[index], &children).unwrap();
         }
-        layout
-            .compute_layout_with_measure(
-                ids[0],
-                Size {
-                    width: TaffyAvailableSpace::Definite(root_rect.width()),
-                    height: TaffyAvailableSpace::Definite(root_rect.height()),
-                },
-                |known, available, _, context, _| {
-                    let node = &tree.nodes[context.copied().unwrap()];
-                    measure(node, host.ctx(), known, available)
-                },
-            )
-            .unwrap();
+        compute_layout(
+            &mut layout,
+            ids[0],
+            Size {
+                width: TaffyAvailableSpace::Definite(root_rect.width()),
+                height: TaffyAvailableSpace::Definite(root_rect.height()),
+            },
+            &tree.nodes,
+            host.ctx(),
+        );
 
         let mut callbacks: Vec<Callback<'frame>> = Vec::new();
         let layouts: Vec<_> = ids.iter().map(|&id| *layout.layout(id).unwrap()).collect();
@@ -497,6 +494,27 @@ impl Dgui {
             }
         }
     }
+}
+
+// Define the measurement closure outside generic UI builders so Taffy's layout
+// algorithms share one specialization across windows and scroll reflows.
+fn compute_layout(
+    layout: &mut TaffyTree<usize>,
+    root: taffy::NodeId,
+    available: Size<TaffyAvailableSpace>,
+    nodes: &[FrameNode<'_>],
+    context: &egui::Context,
+) {
+    layout
+        .compute_layout_with_measure(root, available, |known, available, _, node_index, _| {
+            measure(
+                &nodes[node_index.copied().unwrap()],
+                context,
+                known,
+                available,
+            )
+        })
+        .unwrap();
 }
 
 fn measure(
