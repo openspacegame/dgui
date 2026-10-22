@@ -3,7 +3,8 @@
 //! Each frame, your code builds the whole UI as a tree of [`Frame`]s. dgui lays
 //! the tree out with flexbox ([Taffy](https://docs.rs/taffy)), draws it with
 //! [egui](https://docs.rs/egui), runs the callbacks it collected, and throws the
-//! tree away. Nothing is diffed or retained except the state you ask for.
+//! tree away. Keyed state persists, and unchanged layout geometry is reused after
+//! validating the current tree and its intrinsic measurements.
 //!
 //! # Example
 //!
@@ -114,6 +115,26 @@ struct FrameNode<'a> {
     sense: Option<egui::Sense>,
     accessibility_label: Option<String>,
 }
+impl FrameNode<'_> {
+    fn layout_only(&self) -> bool {
+        self.canvas.is_none()
+            && self.events.click.is_none()
+            && self.events.hover.is_none()
+            && self.events.focus.is_none()
+            && self.events.blur.is_none()
+            && self.events.response.is_none()
+            && !self.clickable
+            && !self.focusable
+            && self.sense.is_none()
+            && self.accessibility_label.is_none()
+            && self.style.background.is_none()
+            && self.style.hover_background.is_none()
+            && self.style.active_background.is_none()
+            && self.style.focus_background.is_none()
+            && self.style.border_width == 0.0
+    }
+}
+
 struct Build<'a> {
     context: egui::Context,
     nodes: Vec<FrameNode<'a>>,
@@ -312,11 +333,12 @@ fn hash(key: impl Hash) -> u64 {
 ///
 /// Keep one `Dgui` per independent tree, typically as a field of your app.
 /// The frame tree and its callbacks are discarded after every call to
-/// [`show`](Self::show); only [`State`]s and [`Tasks`] persist. Dropping the
-/// runtime cancels all its tasks and drops all its state.
+/// [`show`](Self::show). State, tasks, and validated layout geometry persist.
+/// Dropping the runtime cancels all its tasks and drops all its state.
 pub struct Dgui {
     id: u64,
     next_mount: u64,
+    layout_cache: LayoutCache,
     scopes: HashMap<ScopePath, Scope>,
     #[cfg(test)]
     last_layout: Vec<(egui::Id, Rect)>,
@@ -336,6 +358,7 @@ impl Default for Dgui {
         Self {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             next_mount: 0,
+            layout_cache: LayoutCache::default(),
             scopes: HashMap::from([(Vec::new(), Scope::new(0))]),
             #[cfg(test)]
             last_layout: Vec::new(),
@@ -430,41 +453,68 @@ impl Dgui {
         }
         build(&mut builder);
 
-        // Taffy owns transient layout nodes and does not implement Send. Keep
-        // it local while persistent component state remains thread-safe.
+        // Taffy remains local because its nodes are not Send. The cache owns
+        // only geometry and the inputs that justify reusing it.
         let mut layout = TaffyTree::new();
-        // Layout uses egui points, which can cover fractional physical pixels.
-        // Rounding here can narrow an intrinsically measured text leaf enough
-        // to wrap another line after its height has already been determined.
-        // Preserve point geometry; egui handles physical-pixel rasterization.
+        // Preserve fractional UI points so measured text does not wrap again
+        // after layout. egui handles physical-pixel rasterization.
         layout.disable_rounding();
-        let ids: Vec<_> = tree
-            .nodes
-            .iter()
-            .enumerate()
-            .map(|(index, node)| {
-                layout
-                    .new_leaf_with_context(node.style.taffy(), index)
-                    .unwrap()
-            })
-            .collect();
-        for (index, node) in tree.nodes.iter().enumerate() {
-            let children: Vec<_> = node.children.iter().map(|&child| ids[child]).collect();
-            layout.set_children(ids[index], &children).unwrap();
-        }
-        compute_layout(
-            &mut layout,
-            ids[0],
-            Size {
-                width: TaffyAvailableSpace::Definite(root_rect.width()),
-                height: TaffyAvailableSpace::Definite(root_rect.height()),
-            },
-            &tree.nodes,
-            host.ctx(),
-        );
-
+        let mut ids = Vec::new();
+        let size = [root_rect.width(), root_rect.height()];
+        let layouts = if let Some(layouts) = self.layout_cache.reuse(size, &tree.nodes, host.ctx())
+        {
+            layouts
+        } else {
+            ids = tree
+                .nodes
+                .iter()
+                .enumerate()
+                .map(|(index, node)| {
+                    layout
+                        .new_leaf_with_context(node.style.taffy(), index)
+                        .unwrap()
+                })
+                .collect();
+            for (index, node) in tree.nodes.iter().enumerate() {
+                let children: Vec<_> = node.children.iter().map(|&child| ids[child]).collect();
+                layout.set_children(ids[index], &children).unwrap();
+            }
+            // Native scroll containers can reflow during drawing. Their layout
+            // stays transient; independent runtimes inside canvas leaves can cache.
+            let cacheable = tree.nodes.iter().all(|node| {
+                node.style.overflow_x == Overflow::Hidden
+                    && node.style.overflow_y == Overflow::Hidden
+            });
+            let mut measurements = Vec::new();
+            compute_layout(
+                &mut layout,
+                ids[0],
+                Size {
+                    width: TaffyAvailableSpace::Definite(size[0]),
+                    height: TaffyAvailableSpace::Definite(size[1]),
+                },
+                &tree.nodes,
+                host.ctx(),
+                cacheable.then_some(&mut measurements),
+            );
+            let layouts: Vec<_> = ids.iter().map(|&id| *layout.layout(id).unwrap()).collect();
+            if cacheable {
+                self.layout_cache = LayoutCache {
+                    size,
+                    nodes: tree
+                        .nodes
+                        .iter()
+                        .map(|node| (node.style.clone(), node.children.clone()))
+                        .collect(),
+                    measurements,
+                    layouts: layouts.clone(),
+                };
+            } else {
+                self.layout_cache = LayoutCache::default();
+            }
+            layouts
+        };
         let mut callbacks: Vec<Callback<'frame>> = Vec::new();
-        let layouts: Vec<_> = ids.iter().map(|&id| *layout.layout(id).unwrap()).collect();
         let mut drawing = scroll::Drawing {
             nodes: &mut tree.nodes,
             layouts,
@@ -497,6 +547,55 @@ impl Dgui {
     }
 }
 
+#[derive(Default)]
+struct LayoutCache {
+    size: [f32; 2],
+    nodes: Vec<(Style, Vec<usize>)>,
+    measurements: Vec<Measurement>,
+    layouts: Vec<taffy::Layout>,
+}
+
+impl LayoutCache {
+    fn reuse(
+        &self,
+        size: [f32; 2],
+        nodes: &[FrameNode<'_>],
+        context: &egui::Context,
+    ) -> Option<Vec<taffy::Layout>> {
+        if self.size != size
+            || self.nodes.len() != nodes.len()
+            || self
+                .nodes
+                .iter()
+                .zip(nodes)
+                .any(|((style, children), node)| *style != node.style || *children != node.children)
+        {
+            return None;
+        }
+        // Canvas closures may capture new data on every draw. Re-evaluate the
+        // constraints that established this geometry rather than caching closures.
+        for measurement in &self.measurements {
+            if measure(
+                &nodes[measurement.index],
+                context,
+                measurement.known,
+                measurement.available,
+            ) != measurement.result
+            {
+                return None;
+            }
+        }
+        Some(self.layouts.clone())
+    }
+}
+
+struct Measurement {
+    index: usize,
+    known: Size<Option<f32>>,
+    available: Size<TaffyAvailableSpace>,
+    result: Size<f32>,
+}
+
 // Define the measurement closure outside generic UI builders so Taffy's layout
 // algorithms share one specialization across windows and scroll reflows.
 fn compute_layout(
@@ -505,15 +604,21 @@ fn compute_layout(
     available: Size<TaffyAvailableSpace>,
     nodes: &[FrameNode<'_>],
     context: &egui::Context,
+    mut measurements: Option<&mut Vec<Measurement>>,
 ) {
     layout
         .compute_layout_with_measure(root, available, |known, available, _, node_index, _| {
-            measure(
-                &nodes[node_index.copied().unwrap()],
-                context,
-                known,
-                available,
-            )
+            let index = node_index.copied().unwrap();
+            let result = measure(&nodes[index], context, known, available);
+            if let Some(measurements) = &mut measurements {
+                measurements.push(Measurement {
+                    index,
+                    known,
+                    available,
+                    result,
+                });
+            }
+            result
         })
         .unwrap();
 }
@@ -550,6 +655,11 @@ fn render<'a>(
     clip: Rect,
     callbacks: &mut Vec<Callback<'a>>,
 ) {
+    // Layout traversal still applies bounds, clipping, and disabled state to
+    // descendants. An undecorated structural frame needs no egui widget itself.
+    if node.layout_only() {
+        return;
+    }
     let mut ui = host.new_child(
         egui::UiBuilder::new()
             .id_salt(node.id)

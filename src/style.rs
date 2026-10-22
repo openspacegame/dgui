@@ -109,7 +109,7 @@ impl Color {
 ///
 /// let toolbar = Style::row().gap(8.0).padding(4.0).align(Align::Center);
 /// ```
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Style {
     /// Horizontal overflow behavior. Default: [`Overflow::Hidden`].
     pub overflow_x: Overflow,

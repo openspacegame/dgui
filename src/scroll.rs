@@ -141,6 +141,7 @@ impl Drawing<'_, '_> {
             },
             self.nodes,
             host.ctx(),
+            None,
         );
         let mut pending = vec![root];
         while let Some(index) = pending.pop() {

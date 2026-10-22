@@ -918,3 +918,28 @@ fn editor_frame_handlers_cooperate_with_native_input_and_padding_focus() {
     assert_eq!(focused.get(), 1);
     assert_eq!(blurred.get(), 1);
 }
+
+#[test]
+fn rebuilt_canvases_use_current_intrinsic_sizes_and_callbacks() {
+    let ctx = context();
+    let mut gui = Dgui::new();
+    let painted = Cell::new((0, egui::Vec2::ZERO));
+    let responded = Cell::new(0);
+
+    for (generation, height) in [20.0, 40.0, 40.0, 10.0].into_iter().enumerate() {
+        run(&ctx, &mut gui, [200.0, 200.0], vec![], |ui| {
+            ui.add(
+                Frame::canvas(
+                    move |_, _| [80.0, height],
+                    |canvas| painted.set((generation, canvas.content_rect.size())),
+                )
+                .width(80.0)
+                .shrink(0.0)
+                .on_response(|_| responded.set(generation)),
+            );
+        });
+
+        assert_eq!(painted.get(), (generation, egui::vec2(80.0, height)));
+        assert_eq!(responded.get(), generation);
+    }
+}
