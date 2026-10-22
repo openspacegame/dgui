@@ -10,7 +10,7 @@ type Children<'a> = Box<dyn FnOnce(&mut Ui<'_, 'a>) + 'a>;
 ///
 /// Containers, [text](Frame::text), [buttons](crate::button),
 /// [text inputs](crate::text_input), [canvases](Frame::canvas) and
-/// [virtual lists](Frame::virtual_list) are all `Frame`s, so every styling and
+/// [virtual lists](crate::VirtualList) are all `Frame`s, so every styling and
 /// event method works on all of them. A frame does nothing until it is passed
 /// to [`Ui::add`].
 ///

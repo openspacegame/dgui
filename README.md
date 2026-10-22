@@ -26,7 +26,7 @@ Rebuilding everything every frame isn't *that* slow:
 | 10,000 buttons | 12 ms | 61 ms |
 
 dgui costs about 3× as much as plain egui, and a typical screen still takes
-microseconds. When you really do have thousands of rows, `Frame::virtual_list`
+microseconds. When you really do have thousands of rows, `VirtualList`
 builds only the visible ones.
 
 ## Example

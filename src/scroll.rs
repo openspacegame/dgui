@@ -222,15 +222,18 @@ mod tests {
             &mut gui,
             Style::column().width(Length::Percent(1.0)).height(100.0),
             |ui| {
-                ui.add(Frame::virtual_list(
-                    1_000_000,
-                    20.0,
-                    |index| index,
-                    |ui, _| {
-                        count.set(count.get() + 1);
-                        ui.add(Frame::new().height(20.0));
-                    },
-                ));
+                ui.add(
+                    crate::VirtualList::uniform(
+                        1_000_000,
+                        20.0,
+                        |index| index,
+                        |ui, _| {
+                            count.set(count.get() + 1);
+                            ui.add(Frame::new().height(20.0));
+                        },
+                    )
+                    .frame(),
+                );
             },
         );
         assert!(
@@ -297,25 +300,28 @@ mod tests {
                 Style::column().grow(1.0).overflow_x(Overflow::Scroll),
                 |ui| {
                     ui.add(Frame::new().width(600.0).height(32.0).shrink(0.0));
-                    ui.add(Frame::virtual_list(
-                        20,
-                        32.0,
-                        |index| index,
-                        |ui, _| {
-                            ui.add(Frame::canvas(
-                                |_, input| [input.width(), 32.0],
-                                |canvas| {
-                                    if canvas
-                                        .content_rect
-                                        .intersect(canvas.ui.clip_rect())
-                                        .is_positive()
-                                    {
-                                        visible_rows.set(visible_rows.get() + 1);
-                                    }
-                                },
-                            ));
-                        },
-                    ));
+                    ui.add(
+                        crate::VirtualList::uniform(
+                            20,
+                            32.0,
+                            |index| index,
+                            |ui, _| {
+                                ui.add(Frame::canvas(
+                                    |_, input| [input.width(), 32.0],
+                                    |canvas| {
+                                        if canvas
+                                            .content_rect
+                                            .intersect(canvas.ui.clip_rect())
+                                            .is_positive()
+                                        {
+                                            visible_rows.set(visible_rows.get() + 1);
+                                        }
+                                    },
+                                ));
+                            },
+                        )
+                        .frame(),
+                    );
                 },
             );
         });

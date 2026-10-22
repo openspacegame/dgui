@@ -51,7 +51,7 @@
 //!
 //! - **Everything is a [`Frame`].** Containers, [text](Frame::text),
 //!   [buttons](button), [text inputs](text_input), [custom
-//!   canvases](Frame::canvas) and [virtual lists](Frame::virtual_list) are all
+//!   canvases](Frame::canvas) and [virtual lists](crate::VirtualList) are all
 //!   frames, and all share the same [`Style`] and event methods.
 //! - **Building happens before drawing.** [`Ui::add`] runs a frame's
 //!   [`children`](Frame::children) closure immediately, so the complete tree
@@ -87,6 +87,7 @@ pub use frame::Frame;
 pub use state::{State, StateRead};
 pub use style::{Align, Color, Direction, Justify, Length, Overflow, Style};
 pub use tasks::Tasks;
+pub use virtual_list::VirtualList;
 
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use canvas::CanvasContent;
