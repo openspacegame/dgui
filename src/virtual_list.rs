@@ -18,6 +18,7 @@ pub struct VirtualList<'a> {
     key: Box<dyn Fn(usize) -> egui::Id + 'a>,
     row: Box<dyn FnMut(&mut Ui<'_, 'a>, usize) + 'a>,
     reveal: Option<egui::Id>,
+    header: Option<(f32, Box<dyn FnOnce(&mut Ui<'_, 'a>) + 'a>)>,
 }
 
 impl<'a> VirtualList<'a> {
@@ -38,6 +39,7 @@ impl<'a> VirtualList<'a> {
             key: Box::new(move |index| egui::Id::new(crate::hash(key(index)))),
             row: Box::new(row),
             reveal: None,
+            header: None,
         }
     }
 
@@ -59,10 +61,23 @@ impl<'a> VirtualList<'a> {
         self
     }
 
+    /// Prepend content with a declared height inside the same scroll viewport.
+    /// A table header then receives exactly the same width as its rows.
+    /// The header scrolls with the list and is outside the row index space.
+    pub fn header(mut self, height: f32, draw: impl FnOnce(&mut Ui<'_, 'a>) + 'a) -> Self {
+        assert!(height.is_finite() && height > 0.0);
+        self.header = Some((height, Box::new(draw)));
+        self
+    }
+
     /// Build a frame that owns its vertical scroll viewport.
     pub fn frame(mut self) -> Frame<'a> {
         let keys: Vec<_> = (0..self.heights.len()).map(&self.key).collect();
-        let offsets = offsets(&self.heights);
+        let header_height = self.header.as_ref().map_or(0.0, |(height, _)| *height);
+        let offsets: Vec<_> = offsets(&self.heights)
+            .into_iter()
+            .map(|offset| offset + header_height)
+            .collect();
         Frame::canvas(
             move |_, input| {
                 let width = input.known[0].unwrap_or(match input.available[0] {
@@ -74,8 +89,8 @@ impl<'a> VirtualList<'a> {
             move |canvas| {
                 let memory_id = canvas.id.with("virtual-memory");
                 let mut memory = canvas.ui.ctx().data_mut(|data| {
-                    data.get_temp_mut_or_default::<ListMemory>(memory_id)
-                        .clone()
+                    data.remove_temp::<ListMemory>(memory_id)
+                        .unwrap_or_default()
                 });
                 let viewport_height = canvas.content_rect.height();
                 let changed = memory.keys != keys || memory.offsets != offsets;
@@ -107,7 +122,16 @@ impl<'a> VirtualList<'a> {
                         .lock()
                         .unwrap()
                         .show_styled(host, style, |ui| {
-                            ui.add(Frame::new().height(offsets[range.start]).shrink(0.0));
+                            if let Some((height, header)) = self.header.take() {
+                                ui.scope("header", |ui| {
+                                    ui.frame(Style::column().height(height).shrink(0.0), header);
+                                });
+                            }
+                            ui.add(
+                                Frame::new()
+                                    .height(offsets[range.start] - header_height)
+                                    .shrink(0.0),
+                            );
                             for index in range.clone() {
                                 ui.scope(keys[index], |ui| {
                                     ui.frame(
