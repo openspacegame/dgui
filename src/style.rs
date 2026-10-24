@@ -121,8 +121,8 @@ pub struct Style {
     pub wrap: bool,
     /// Space between adjacent children, and between wrapped lines. Default: 0.
     pub gap: f32,
-    /// Space between the border and the content, on all four sides. Default: 0.
-    pub padding: f32,
+    /// Horizontal and vertical space between border and content. Default: zero.
+    pub padding: [f32; 2],
     /// Space outside the frame, on all four sides. Default: 0.
     pub margin: f32,
     /// Border thickness, on all four sides. Takes up layout space. Default: 0.
@@ -172,7 +172,7 @@ impl Default for Style {
             direction: Direction::Column,
             wrap: false,
             gap: 0.0,
-            padding: 0.0,
+            padding: [0.0; 2],
             margin: 0.0,
             border_width: 0.0,
             border_color: Color::rgb(0, 0, 0),
@@ -214,7 +214,18 @@ impl Style {
     pub fn column() -> Self {
         Self::default()
     }
-    setters! { direction: Direction, wrap: bool, gap: f32, padding: f32, margin: f32,
+    /// Set equal padding on every side.
+    pub fn padding(self, value: f32) -> Self {
+        self.padding_xy(value, value)
+    }
+
+    /// Set horizontal and vertical padding independently.
+    pub fn padding_xy(mut self, horizontal: f32, vertical: f32) -> Self {
+        self.padding = [horizontal, vertical];
+        self
+    }
+
+    setters! { direction: Direction, wrap: bool, gap: f32, margin: f32,
     grow: f32, shrink: f32, align: Align, justify: Justify, corner_radius: u8,
     overflow_x: Overflow, overflow_y: Overflow }
     /// Sets [`background`](Self::background).
@@ -308,10 +319,10 @@ impl Style {
                 height: dimension(self.max_height),
             },
             padding: Rect {
-                left: LengthPercentage::length(self.padding),
-                right: LengthPercentage::length(self.padding),
-                top: LengthPercentage::length(self.padding),
-                bottom: LengthPercentage::length(self.padding),
+                left: LengthPercentage::length(self.padding[0]),
+                right: LengthPercentage::length(self.padding[0]),
+                top: LengthPercentage::length(self.padding[1]),
+                bottom: LengthPercentage::length(self.padding[1]),
             },
             margin: Rect {
                 left: taffy::LengthPercentageAuto::length(self.margin),

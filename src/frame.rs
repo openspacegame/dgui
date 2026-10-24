@@ -126,7 +126,19 @@ impl<'a> Frame<'a> {
         self.style = style;
         self
     }
-    setters! { direction: Direction, wrap: bool, gap: f32, padding: f32, margin: f32,
+    /// Set equal padding on every side.
+    pub fn padding(mut self, value: f32) -> Self {
+        self.style = self.style.padding(value);
+        self
+    }
+
+    /// Set horizontal and vertical padding independently.
+    pub fn padding_xy(mut self, horizontal: f32, vertical: f32) -> Self {
+        self.style = self.style.padding_xy(horizontal, vertical);
+        self
+    }
+
+    setters! { direction: Direction, wrap: bool, gap: f32, margin: f32,
     grow: f32, shrink: f32, align: Align, justify: Justify, corner_radius: u8,
     overflow_x: Overflow, overflow_y: Overflow,
     background: Color, hover_background: Color, active_background: Color, focus_background: Color }
