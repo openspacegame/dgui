@@ -230,7 +230,7 @@ impl Text {
     }
 
     fn wrapped(&self, ctx: &egui::Context, text: &str, width: f32) -> String {
-        if !self.wraps() || !width.is_finite() {
+        if !self.wraps() || !width.is_finite() || self.unwrapped(ctx, text).size().x <= width {
             return text.to_owned();
         }
         let mut lines = Vec::new();
