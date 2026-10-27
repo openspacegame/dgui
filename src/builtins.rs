@@ -1,6 +1,5 @@
 //! Convenience constructors returning the same Frame as every other element.
 use crate::{Align, Color, Frame, Justify, State};
-use std::rc::Rc;
 
 const FONT_SIZE: f32 = 16.0;
 fn text_color() -> egui::Color32 {
@@ -17,23 +16,10 @@ fn text_layout(ctx: &egui::Context, text: &str, width: f32) -> std::sync::Arc<eg
     })
 }
 impl<'a> Frame<'a> {
-    /// A frame containing text that wraps to fit the frame's width.
-    ///
-    /// Its preferred width is the unwrapped text width, and its height grows
-    /// with the number of wrapped lines.
+    /// Body text using normal whitespace and Unicode line breaks.
+    /// Use [`crate::Text`] to set typography, whitespace, or overflow policies.
     pub fn text(text: impl Into<String>) -> Self {
-        let text: Rc<str> = text.into().into();
-        let measured = text.clone();
-        Self::canvas(
-            move |ctx, input| text_layout(ctx, &measured, input.width()).size().into(),
-            move |canvas| {
-                let galley = text_layout(canvas.ui.ctx(), &text, canvas.content_rect.width());
-                canvas
-                    .ui
-                    .painter()
-                    .galley(canvas.content_rect.min, galley, text_color());
-            },
-        )
+        crate::Text::new(text).frame()
     }
 }
 

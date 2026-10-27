@@ -523,7 +523,11 @@ fn canvas_runs_once_after_layout_with_padding_and_clipping() {
     run(&context(), &mut gui, [400.0, 300.0], vec![], |ui| {
         assert_eq!(calls.get(), 0);
         ui.frame(
-            Style::default().width(100.0).height(80.0).padding(10.0),
+            Style::default()
+                .width(100.0)
+                .height(80.0)
+                .padding(10.0)
+                .overflow(Overflow::Clip),
             |ui| {
                 ui.add(
                     Frame::egui_canvas([150.0, 100.0], |canvas| {
@@ -654,19 +658,25 @@ fn canvas_button_interacts_in_padding_but_respects_ancestor_clipping() {
     ];
     for events in events {
         run(&ctx, &mut gui, [400.0, 300.0], events, |ui| {
-            ui.frame(Style::column().width(60.0).height(50.0), |ui| {
-                ui.add(
-                    button("click")
-                        .style(
-                            Style::default()
-                                .width(120.0)
-                                .height(40.0)
-                                .padding(10.0)
-                                .shrink(0.0),
-                        )
-                        .on_click(|| clicks += 1),
-                );
-            });
+            ui.frame(
+                Style::column()
+                    .width(60.0)
+                    .height(50.0)
+                    .overflow(Overflow::Clip),
+                |ui| {
+                    ui.add(
+                        button("click")
+                            .style(
+                                Style::default()
+                                    .width(120.0)
+                                    .height(40.0)
+                                    .padding(10.0)
+                                    .shrink(0.0),
+                            )
+                            .on_click(|| clicks += 1),
+                    );
+                },
+            );
         });
     }
     assert_eq!(clicks, 1);
@@ -941,5 +951,117 @@ fn rebuilt_canvases_use_current_intrinsic_sizes_and_callbacks() {
 
         assert_eq!(painted.get(), (generation, egui::vec2(80.0, height)));
         assert_eq!(responded.get(), generation);
+    }
+}
+
+#[test]
+fn flex_basis_auto_minimum_and_clipping_have_css_sizing() {
+    let ctx = context();
+    let mut gui = Dgui::new();
+    for (minimum, overflow, expected) in [
+        (Length::Auto, Overflow::Visible, 80.0),
+        (Length::Auto, Overflow::Clip, 80.0),
+        (Length::Px(0.0), Overflow::Visible, 50.0),
+        (Length::Auto, Overflow::Hidden, 50.0),
+    ] {
+        run(&ctx, &mut gui, [100.0, 100.0], vec![], |ui| {
+            ui.add(Frame::new().children(|ui| {
+                ui.add(
+                    Frame::canvas(|_, _| [80.0, 20.0], |_| {})
+                        .basis(0.0)
+                        .grow(1.0)
+                        .min_width(minimum)
+                        .overflow(overflow),
+                );
+                ui.add(Frame::new().width(50.0).shrink(0.0));
+            }));
+        });
+        near(gui.last_layout[2].1.width(), expected);
+        near(gui.last_layout[3].1.left(), expected);
+    }
+}
+
+#[test]
+fn box_sizing_edges_auto_margins_and_self_alignment_compose() {
+    for (sizing, width, height) in [
+        (BoxSizing::BorderBox, 60.0, 40.0),
+        (BoxSizing::ContentBox, 80.0, 50.0),
+    ] {
+        let mut gui = Dgui::new();
+        run(&context(), &mut gui, [200.0, 100.0], vec![], |ui| {
+            ui.add(Frame::new().height(100.0).children(|ui| {
+                ui.add(
+                    Frame::new()
+                        .width(60.0)
+                        .height(40.0)
+                        .padding_edges([2.0, 6.0, 4.0, 10.0])
+                        .border(2.0, Color::rgb(0, 0, 0))
+                        .box_sizing(sizing)
+                        .margin_left(Length::Auto)
+                        .align_self(Some(Align::End)),
+                );
+            }));
+        });
+        let rect = gui.last_layout[2].1;
+        near(rect.width(), width);
+        near(rect.height(), height);
+        near(rect.right(), 200.0);
+        near(rect.bottom(), 100.0);
+    }
+}
+
+#[test]
+fn wrapped_lines_use_independent_gaps_and_content_alignment() {
+    let mut gui = Dgui::new();
+    run(&context(), &mut gui, [100.0, 100.0], vec![], |ui| {
+        ui.add(
+            Frame::new()
+                .height(100.0)
+                .wrap(true)
+                .row_gap(10.0)
+                .column_gap(20.0)
+                .align_content(AlignContent::End)
+                .children(|ui| {
+                    for _ in 0..3 {
+                        ui.add(Frame::new().width(40.0).height(20.0));
+                    }
+                }),
+        );
+    });
+    near(gui.last_layout[2].1.top(), 50.0);
+    near(gui.last_layout[3].1.left(), 60.0);
+    near(gui.last_layout[4].1.top(), 80.0);
+}
+
+#[test]
+fn visible_overflow_remains_interactive_until_an_ancestor_clips() {
+    for (overflow, expected) in [(Overflow::Visible, 1), (Overflow::Clip, 0)] {
+        let ctx = context();
+        let mut gui = Dgui::new();
+        let clicks = Cell::new(0);
+        for events in [
+            vec![],
+            pointer(egui::pos2(80.0, 10.0), true),
+            pointer(egui::pos2(80.0, 10.0), false),
+        ] {
+            run(&ctx, &mut gui, [200.0, 100.0], events, |ui| {
+                ui.add(
+                    Frame::new()
+                        .width(40.0)
+                        .height(40.0)
+                        .overflow(overflow)
+                        .children(|ui| {
+                            ui.add(
+                                Frame::new()
+                                    .width(100.0)
+                                    .height(30.0)
+                                    .shrink(0.0)
+                                    .on_click(|| clicks.set(clicks.get() + 1)),
+                            );
+                        }),
+                );
+            });
+        }
+        assert_eq!(clicks.get(), expected);
     }
 }

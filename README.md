@@ -39,13 +39,13 @@ use dgui::{Align, Color, Direction, Frame, Justify, Length, Ui, button, text_inp
 fn sign_in<'a>(ui: &mut Ui<'_, 'a>) -> Frame<'a> {
     let name = ui.state("name", || String::from("Ada"));
 
-    Frame::new()
+    Frame::new().direction(dgui::Direction::Column)
         .width(Length::Percent(1.0))
         .height(Length::Percent(1.0))
         .align(Align::Center)
         .justify(Justify::Center)
         .children(move |ui| {
-            ui.add(Frame::new().width(360.0).padding(24.0).gap(16.0)
+            ui.add(Frame::new().direction(dgui::Direction::Column).width(360.0).padding(24.0).gap(16.0)
                 .background(Color::rgb(28, 38, 55)).corner_radius(12)
                 .children(move |ui| {
                     ui.add(Frame::new().direction(Direction::Row)
@@ -87,6 +87,11 @@ To make that work:
   built. State writes show up in the next frame.
 - **Scopes own async tasks** (`ui.tasks()`), and those tasks are dropped
   when the scope unmounts.
+
+## Layout
+
+See [Layout for CSS users](docs/layout.md) for defaults, property mappings,
+text policies, overflow behavior, and common compositions.
 
 ## Running the examples
 

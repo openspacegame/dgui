@@ -9,26 +9,29 @@ struct ResponsivePanel<'a> {
     final_size: &'a Cell<[f32; 2]>,
 }
 fn responsive_panel<'a>(panel: ResponsivePanel<'a>) -> Frame<'a> {
-    Frame::new().padding(10.0).children(move |ui| {
-        ui.add(Frame::text("Custom component"));
-        let measured = panel.measured;
-        let drawn = panel.drawn;
-        ui.add(Frame::canvas(
-            move |_, input| {
-                assert_eq!(drawn.get(), 0, "all layout must precede drawing");
-                measured.set(measured.get() + 1);
-                let width = input.width().clamp(1.0, 200.0);
-                [width, 2000.0 / width]
-            },
-            move |canvas| {
-                assert!(panel.measured.get() > 0);
-                assert_eq!(panel.effects.get(), 0);
-                panel.drawn.set(panel.drawn.get() + 1);
-                panel.final_size.set(canvas.content_rect.size().into());
-                canvas.defer(move || panel.effects.set(panel.effects.get() + 1));
-            },
-        ));
-    })
+    Frame::new()
+        .direction(dgui::Direction::Column)
+        .padding(10.0)
+        .children(move |ui| {
+            ui.add(Frame::text("Custom component"));
+            let measured = panel.measured;
+            let drawn = panel.drawn;
+            ui.add(Frame::canvas(
+                move |_, input| {
+                    assert_eq!(drawn.get(), 0, "all layout must precede drawing");
+                    measured.set(measured.get() + 1);
+                    let width = input.width().clamp(1.0, 200.0);
+                    [width, 2000.0 / width]
+                },
+                move |canvas| {
+                    assert!(panel.measured.get() > 0);
+                    assert_eq!(panel.effects.get(), 0);
+                    panel.drawn.set(panel.drawn.get() + 1);
+                    panel.final_size.set(canvas.content_rect.size().into());
+                    canvas.defer(move || panel.effects.set(panel.effects.get() + 1));
+                },
+            ));
+        })
 }
 
 #[test]

@@ -65,6 +65,12 @@
 //!   owned by the enclosing [`Ui::scope`]. A scope that isn't built during a
 //!   call to [`Dgui::show`] unmounts, dropping its state and [`Tasks`].
 //!
+//! # Layout
+//!
+//! Frames use CSS flex defaults with a border-box reset: rows, automatic
+//! minimum sizes, visible overflow, and zero spacing. See [`Style`] and [`Text`].
+//! `Dgui::show` supplies a full-size column host; `show_styled` chooses the host.
+//!
 //! # Requirements
 //!
 //! - The egui context must use `max_passes = 1`; [`Dgui::show`] panics
@@ -80,14 +86,18 @@ mod scroll;
 mod state;
 mod style;
 mod tasks;
+mod text;
 mod virtual_list;
 pub use builtins::{button, text_input};
 pub use canvas::{AvailableSpace, Canvas, MeasureInput};
 use frame::Events;
 pub use frame::Frame;
 pub use state::{State, StateRead};
-pub use style::{Align, Color, Direction, Justify, Length, Overflow, Style};
+pub use style::{
+    Align, AlignContent, BoxSizing, Color, Direction, Justify, Length, Overflow, Style,
+};
 pub use tasks::Tasks;
+pub use text::{OverflowWrap, Text, TextAlign, TextOverflow, WhiteSpace};
 pub use virtual_list::VirtualList;
 
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
@@ -103,11 +113,19 @@ use taffy::{AvailableSpace as TaffyAvailableSpace, Size, TaffyTree};
 type Callback<'a> = Box<dyn FnOnce() + 'a>;
 type ScopePath = Vec<u64>;
 
+#[derive(Default)]
+enum Content<'a> {
+    #[default]
+    Empty,
+    Canvas(CanvasContent<'a>),
+    Text(Text),
+}
+
 struct FrameNode<'a> {
     id: egui::Id,
     children: Vec<usize>,
     style: Style,
-    canvas: Option<CanvasContent<'a>>,
+    content: Content<'a>,
     events: Events<'a>,
     clickable: bool,
     focusable: bool,
@@ -117,7 +135,7 @@ struct FrameNode<'a> {
 }
 impl FrameNode<'_> {
     fn layout_only(&self) -> bool {
-        self.canvas.is_none()
+        matches!(self.content, Content::Empty)
             && self.events.click.is_none()
             && self.events.hover.is_none()
             && self.events.focus.is_none()
@@ -178,7 +196,7 @@ impl<'frame> Ui<'_, 'frame> {
     /// except that `children` need not be `'frame`, so it can borrow locals.
     /// The children stay in the current state scope.
     pub fn frame(&mut self, style: Style, children: impl FnOnce(&mut Ui<'_, 'frame>)) {
-        let parent = self.push_container(Frame::new().style(style));
+        let parent = self.push(Frame::new().style(style));
         children(&mut Ui {
             build: self.build,
             scopes: self.scopes,
@@ -194,11 +212,7 @@ impl<'frame> Ui<'_, 'frame> {
     /// before this call returns and before any layout or interaction.
     pub fn add(&mut self, mut frame: Frame<'frame>) {
         let children = frame.children.take();
-        let parent = if children.is_some() {
-            self.push_container(frame)
-        } else {
-            self.push(frame)
-        };
+        let parent = self.push(frame);
         if let Some(children) = children {
             children(&mut Ui {
                 build: self.build,
@@ -298,7 +312,7 @@ impl<'frame> Ui<'_, 'frame> {
             id,
             children: Vec::new(),
             style: frame.style,
-            canvas: frame.canvas,
+            content: frame.content,
             events: frame.events,
             clickable: frame.clickable,
             focusable: frame.focusable,
@@ -308,18 +322,6 @@ impl<'frame> Ui<'_, 'frame> {
         });
         self.build.nodes[self.parent].children.push(index);
         index
-    }
-
-    fn push_container(&mut self, mut frame: Frame<'frame>) -> usize {
-        let Some(content) = scroll::content_style(&mut frame.style) else {
-            return self.push(frame);
-        };
-        let outer = self.push(frame);
-        let previous = self.parent;
-        self.parent = outer;
-        let inner = self.push(Frame::new().style(content));
-        self.parent = previous;
-        inner
     }
 }
 fn hash(key: impl Hash) -> u64 {
@@ -427,7 +429,7 @@ impl Dgui {
                 id: egui::Id::new((self.id, "root")),
                 children: Vec::new(),
                 style,
-                canvas: None,
+                content: Content::Empty,
                 events: Events::default(),
                 clickable: false,
                 focusable: false,
@@ -439,7 +441,6 @@ impl Dgui {
             state_keys: HashSet::new(),
             ordinals: HashMap::new(),
         };
-        let content_style = scroll::content_style(&mut tree.nodes[0].style);
         let mut builder = Ui {
             build: &mut tree,
             scopes: &mut self.scopes,
@@ -448,9 +449,6 @@ impl Dgui {
             path: Vec::new(),
             parent: 0,
         };
-        if let Some(style) = content_style {
-            builder.parent = builder.push(Frame::new().style(style));
-        }
         build(&mut builder);
 
         // Taffy remains local because its nodes are not Send. The cache owns
@@ -482,8 +480,11 @@ impl Dgui {
             // Native scroll containers can reflow during drawing. Their layout
             // stays transient; independent runtimes inside canvas leaves can cache.
             let cacheable = tree.nodes.iter().all(|node| {
-                node.style.overflow_x == Overflow::Hidden
-                    && node.style.overflow_y == Overflow::Hidden
+                !node
+                    .style
+                    .effective_overflow()
+                    .iter()
+                    .any(|value| value.is_scroll_container())
             });
             let mut measurements = Vec::new();
             compute_layout(
@@ -637,10 +638,11 @@ fn measure(
             TaffyAvailableSpace::MaxContent => AvailableSpace::MaxContent,
         }),
     };
-    let natural = node
-        .canvas
-        .as_ref()
-        .map_or([0.0; 2], |canvas| (canvas.measure)(context, input));
+    let natural = match &node.content {
+        Content::Empty => [0.0; 2],
+        Content::Canvas(canvas) => (canvas.measure)(context, input),
+        Content::Text(text) => text.measure(context, input),
+    };
     Size {
         width: known.width.unwrap_or(natural[0]),
         height: known.height.unwrap_or(natural[1]),
@@ -652,6 +654,7 @@ fn render<'a>(
     node: &mut FrameNode<'a>,
     rect: Rect,
     content_rect: Rect,
+    parent_clip: Rect,
     clip: Rect,
     callbacks: &mut Vec<Callback<'a>>,
 ) {
@@ -666,7 +669,7 @@ fn render<'a>(
             .max_rect(content_rect)
             .layout(egui::Layout::top_down(egui::Align::Min)),
     );
-    ui.set_clip_rect(clip);
+    ui.set_clip_rect(parent_clip);
     if !node.enabled {
         ui.disable();
     }
@@ -711,18 +714,24 @@ fn render<'a>(
             egui::StrokeKind::Inside,
         );
     }
-    ui.set_clip_rect(clip.intersect(content_rect));
+    ui.set_clip_rect(clip);
+    if let Content::Text(text) = &node.content {
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), text.value())
+        });
+        text.paint(&mut ui, content_rect, node.style.effective_overflow());
+    }
     let mut canvas_context = Canvas {
         ui: &mut ui,
         id: node.id,
         frame_rect: rect,
         content_rect,
-        frame_clip: clip,
+        frame_clip: parent_clip.intersect(rect),
         callbacks,
         response: response.clone(),
         content_response: None,
     };
-    if let Some(canvas) = &mut node.canvas
+    if let Content::Canvas(canvas) = &mut node.content
         && let Some(paint) = canvas.paint.take()
     {
         paint(&mut canvas_context);

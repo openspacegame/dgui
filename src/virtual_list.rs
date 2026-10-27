@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::{AvailableSpace, Dgui, Frame, Length, Style, Ui};
+use crate::{AvailableSpace, Dgui, Frame, Length, Overflow, Style, Ui};
 
 /// A scrolling viewport that constructs only intersecting rows and overscan.
 ///
@@ -124,7 +124,13 @@ impl<'a> VirtualList<'a> {
                         .show_styled(host, style, |ui| {
                             if let Some((height, header)) = self.header.take() {
                                 ui.scope("header", |ui| {
-                                    ui.frame(Style::column().height(height).shrink(0.0), header);
+                                    ui.frame(
+                                        Style::column()
+                                            .height(height)
+                                            .shrink(0.0)
+                                            .overflow(Overflow::Clip),
+                                        header,
+                                    );
                                 });
                             }
                             ui.add(
@@ -135,7 +141,10 @@ impl<'a> VirtualList<'a> {
                             for index in range.clone() {
                                 ui.scope(keys[index], |ui| {
                                     ui.frame(
-                                        Style::column().height(self.heights[index]).shrink(0.0),
+                                        Style::column()
+                                            .height(self.heights[index])
+                                            .shrink(0.0)
+                                            .overflow(Overflow::Clip),
                                         |ui| {
                                             (self.row)(ui, index);
                                         },
@@ -159,6 +168,8 @@ impl<'a> VirtualList<'a> {
             },
         )
         .grow(1.0)
+        .min_height(0.0)
+        .overflow(Overflow::Clip)
     }
 }
 

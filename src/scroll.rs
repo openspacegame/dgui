@@ -1,34 +1,38 @@
 //! Rendering traversal keeps native scroll containers nested so egui can route
 //! wheel input from the innermost viewport to its ancestors at scroll limits.
 
-use crate::{Align, Callback, Direction, FrameNode, Justify, Length, Overflow, Style, render};
+use crate::{Callback, FrameNode, Overflow, render};
 use egui::{Pos2, Rect};
 
-/// Separate viewport sizing from intrinsic content sizing within a scroll frame.
-pub fn content_style(viewport: &mut Style) -> Option<Style> {
-    if viewport.overflow_x == Overflow::Hidden && viewport.overflow_y == Overflow::Hidden {
-        return None;
+/// Clip only the axes that establish an overflow boundary.
+pub fn content_clip(parent: Rect, padding_box: Rect, overflow: [Overflow; 2]) -> Rect {
+    let mut clip = parent;
+    if overflow[0] != Overflow::Visible {
+        clip.min.x = clip.min.x.max(padding_box.min.x);
+        clip.max.x = clip.max.x.min(padding_box.max.x);
     }
-    let mut content = Style::default()
-        .direction(viewport.direction)
-        .gap(viewport.gap)
-        .wrap(viewport.wrap)
-        .align(viewport.align)
-        .justify(viewport.justify)
-        .shrink(0.0);
-    if viewport.overflow_x == Overflow::Hidden {
-        content.width = Length::Percent(1.0);
-    } else {
-        content.min_width = Length::Percent(1.0);
+    if overflow[1] != Overflow::Visible {
+        clip.min.y = clip.min.y.max(padding_box.min.y);
+        clip.max.y = clip.max.y.min(padding_box.max.y);
     }
-    if viewport.overflow_y == Overflow::Hidden {
-        content.height = Length::Percent(1.0);
-    }
-    viewport.direction = Direction::Column;
-    viewport.gap = 0.0;
-    viewport.justify = Justify::Start;
-    viewport.align = Align::Start;
-    Some(content)
+    clip
+}
+
+fn scroll_area(id: egui::Id, axes: [bool; 2], visibility: Overflow) -> egui::ScrollArea {
+    use egui::scroll_area::{ScrollBarVisibility, ScrollSource};
+    egui::ScrollArea::new(axes)
+        .id_salt(id)
+        .auto_shrink([false, false])
+        .scroll_bar_visibility(match visibility {
+            Overflow::Scroll => ScrollBarVisibility::AlwaysVisible,
+            Overflow::Hidden => ScrollBarVisibility::AlwaysHidden,
+            _ => ScrollBarVisibility::VisibleWhenNeeded,
+        })
+        .scroll_source(if visibility == Overflow::Hidden {
+            ScrollSource::NONE
+        } else {
+            ScrollSource::default()
+        })
 }
 
 pub struct Drawing<'a, 'frame> {
@@ -54,7 +58,7 @@ impl Drawing<'_, '_> {
             origin + egui::vec2(layout.location.x, layout.location.y),
             egui::vec2(layout.size.width, layout.size.height),
         );
-        let clip = parent_clip.intersect(rect);
+
         let inset = egui::vec2(
             layout.padding.left + layout.border.left,
             layout.padding.top + layout.border.top,
@@ -72,75 +76,155 @@ impl Drawing<'_, '_> {
         let node = &mut self.nodes[index];
         #[cfg(test)]
         self.rectangles.push((node.id, rect));
-        render(host, node, rect, content_rect, clip, self.callbacks);
-
-        let axes = [
-            node.style.overflow_x == Overflow::Scroll,
-            node.style.overflow_y == Overflow::Scroll,
-        ];
+        let overflow = node.style.effective_overflow();
+        let padding_box = Rect::from_min_max(
+            rect.min + egui::vec2(layout.border.left, layout.border.top),
+            rect.max - egui::vec2(layout.border.right, layout.border.bottom),
+        );
+        let clip = content_clip(parent_clip, padding_box, overflow);
+        let axes = overflow.map(Overflow::user_scroll);
+        if !axes.iter().any(|&enabled| enabled) {
+            render(
+                host,
+                node,
+                rect,
+                content_rect,
+                parent_clip,
+                clip,
+                self.callbacks,
+            );
+        }
         let children = node.children.clone();
-        if axes.iter().any(|&enabled| enabled) && !children.is_empty() {
+        if axes.iter().any(|&enabled| enabled) {
+            let id = node.id;
+            let enabled = node.enabled;
             let mut viewport = host.new_child(
                 egui::UiBuilder::new()
-                    .id_salt(node.id.with("viewport"))
+                    .id_salt(id.with("viewport"))
                     .max_rect(content_rect),
             );
             viewport.set_clip_rect(clip.intersect(content_rect));
-            if !node.enabled {
+            if !enabled {
                 viewport.disable();
             }
-            egui::ScrollArea::new(axes)
-                .id_salt(node.id.with("scroll"))
-                .auto_shrink([false, false])
-                .show(&mut viewport, |content| {
-                    // Native scrollbars can occupy an animated gutter. Reflow
-                    // against the actual viewport before drawing, so wrapping
-                    // and percentage widths use the same bounds as clipping.
-                    let origin = content.next_widget_position();
-                    for child in children {
-                        self.reflow(content, child, axes);
-                        let child_rect = self.draw(content, child, origin, content.clip_rect());
-                        content.expand_to_include_rect(child_rect);
-                    }
-                });
+            // Separate native areas preserve independently requested scrollbar
+            // policies. Both receive the same finite viewport extent.
+            if axes == [true, true] && overflow[0] != overflow[1] {
+                scroll_area(id.with("scroll-x"), [true, false], overflow[0]).show_viewport(
+                    &mut viewport,
+                    |horizontal, x_view| {
+                        horizontal.set_width(x_view.width());
+                        scroll_area(id.with("scroll-y"), [false, true], overflow[1])
+                            .max_height(content_rect.height())
+                            .show_viewport(horizontal, |content, y_view| {
+                                self.draw_scrolled(
+                                    content,
+                                    index,
+                                    y_view.size(),
+                                    inset,
+                                    rect,
+                                    parent_clip,
+                                );
+                            });
+                    },
+                );
+            } else {
+                let visibility = if axes[0] { overflow[0] } else { overflow[1] };
+                scroll_area(id.with("scroll"), axes, visibility).show_viewport(
+                    &mut viewport,
+                    |content, view| {
+                        self.draw_scrolled(content, index, view.size(), inset, rect, parent_clip);
+                    },
+                );
+            }
         } else {
             for child in children {
-                self.draw(host, child, rect.min, clip.intersect(content_rect));
+                self.draw(host, child, rect.min, clip);
             }
         }
         rect
     }
 
-    fn reflow(&mut self, host: &egui::Ui, root: usize, axes: [bool; 2]) {
-        use taffy::{AvailableSpace, Size};
-
-        let available = host.available_size_before_wrap();
-        if axes[0] {
-            // The initial layout already established the intrinsic extent.
-            // Resolve a concrete width here so percentage-width children can
-            // share a wider viewport while retaining horizontal overflow.
-            let id = self.ids[root];
-            let mut style = self.layout.style(id).unwrap().clone();
-            style.size.width =
-                taffy::Dimension::length(self.layouts[root].size.width.max(available.x));
-            self.layout.set_style(id, style).unwrap();
+    fn draw_scrolled(
+        &mut self,
+        content: &mut egui::Ui,
+        index: usize,
+        viewport: egui::Vec2,
+        inset: egui::Vec2,
+        frame_rect: Rect,
+        parent_clip: Rect,
+    ) {
+        let original = self.layouts[index];
+        let size = egui::vec2(
+            viewport.x
+                + original.padding.left
+                + original.padding.right
+                + original.border.left
+                + original.border.right,
+            viewport.y
+                + original.padding.top
+                + original.padding.bottom
+                + original.border.top
+                + original.border.bottom,
+        );
+        self.reflow(content.ctx(), index, size);
+        let layout = self.layouts[index];
+        let content_origin = content.next_widget_position();
+        let origin = content_origin - inset;
+        let node = &mut self.nodes[index];
+        let measured = crate::measure(
+            node,
+            content.ctx(),
+            taffy::Size::NONE,
+            taffy::Size {
+                width: taffy::AvailableSpace::Definite(viewport.x),
+                height: taffy::AvailableSpace::Definite(viewport.y),
+            },
+        );
+        let extent = viewport.max(egui::vec2(measured.width, measured.height));
+        render(
+            content,
+            node,
+            frame_rect,
+            Rect::from_min_size(content_origin, extent),
+            parent_clip,
+            content.clip_rect(),
+            self.callbacks,
+        );
+        for child in self.nodes[index].children.clone() {
+            self.draw(content, child, origin, content.clip_rect());
         }
-        let space = |scrolling, size| {
-            if scrolling {
-                AvailableSpace::MaxContent
-            } else {
-                AvailableSpace::Definite(size)
-            }
+        // Taffy's overflow extent includes visible overflow from descendants
+        // and stops at nested clipping/scrolling boundaries.
+        content.set_min_size(egui::vec2(
+            (layout.content_size.width - inset.x).max(extent.x),
+            (layout.content_size.height - inset.y).max(extent.y),
+        ));
+    }
+
+    fn reflow(&mut self, context: &egui::Context, root: usize, size: egui::Vec2) {
+        use taffy::{AvailableSpace, Dimension, Size};
+        let id = self.ids[root];
+        let mut style = self.layout.style(id).unwrap().clone();
+        // Preserve the parent's allocated border box while accounting for the
+        // actual native scrollbar gutter. Do not introduce a flex wrapper.
+        style.box_sizing = taffy::BoxSizing::BorderBox;
+        style.size = Size {
+            width: Dimension::length(size.x),
+            height: Dimension::length(size.y),
         };
+        style.min_size = style.size;
+        style.max_size = style.size;
+        self.layout.set_style(id, style).unwrap();
         crate::compute_layout(
             self.layout,
-            self.ids[root],
+            id,
             Size {
-                width: space(axes[0], available.x),
-                height: space(axes[1], available.y),
+                width: AvailableSpace::Definite(size.x),
+                height: AvailableSpace::Definite(size.y),
             },
             self.nodes,
-            host.ctx(),
+            context,
             None,
         );
         let mut pending = vec![root];
@@ -183,7 +267,7 @@ mod tests {
                 .padding(8.0)
                 .gap(5.0),
             |ui| {
-                ui.add(Frame::new().height(30.0));
+                ui.add(Frame::new().height(30.0).shrink(0.0));
                 ui.add(Frame::new().height(40.0));
             },
         );
@@ -198,10 +282,10 @@ mod tests {
             Style::column().width(Length::Percent(1.0)),
             |ui| {
                 ui.frame(
-                    Style::column().height(100.0).overflow_y(Overflow::Scroll),
+                    Style::column().height(100.0).overflow_y(Overflow::Auto),
                     |ui| {
                         for _ in 0..20 {
-                            ui.add(Frame::new().height(30.0));
+                            ui.add(Frame::new().height(30.0).shrink(0.0));
                         }
                     },
                 );
@@ -209,8 +293,7 @@ mod tests {
         );
         assert_eq!(gui.last_layout[0].1.height(), 100.0);
         assert_eq!(gui.last_layout[1].1.height(), 100.0);
-        assert_eq!(gui.last_layout[2].1.height(), 600.0);
-        for (_, rect) in &gui.last_layout[3..] {
+        for (_, rect) in &gui.last_layout[2..] {
             assert_eq!(rect.height(), 30.0);
         }
     }
@@ -230,7 +313,7 @@ mod tests {
                         |index| index,
                         |ui, _| {
                             count.set(count.get() + 1);
-                            ui.add(Frame::new().height(20.0));
+                            ui.add(Frame::new().height(20.0).shrink(0.0));
                         },
                     )
                     .frame(),
@@ -255,13 +338,13 @@ mod tests {
                     .overflow_x(Overflow::Scroll),
                 |ui| {
                     for _ in 0..20 {
-                        ui.add(Frame::new().width(30.0).height(20.0));
+                        ui.add(Frame::new().width(30.0).height(20.0).shrink(0.0));
                     }
                 },
             );
         });
         assert_eq!(gui.last_layout[1].1.width(), 100.0);
-        assert_eq!(gui.last_layout[2].1.width(), 600.0);
+        assert_eq!(gui.last_layout[21].1.right(), 600.0);
     }
 
     #[test]
@@ -288,7 +371,7 @@ mod tests {
                     },
                 );
             });
-            assert_eq!(gui.last_layout[3].1.width(), width.max(200.0));
+            assert_eq!(gui.last_layout[2].1.width(), width.max(200.0));
         }
     }
 
@@ -298,7 +381,10 @@ mod tests {
         let visible_rows = std::cell::Cell::new(0);
         run(&mut gui, Style::column().width(200.0).height(300.0), |ui| {
             ui.frame(
-                Style::column().grow(1.0).overflow_x(Overflow::Scroll),
+                Style::column()
+                    .grow(1.0)
+                    .overflow_x(Overflow::Auto)
+                    .overflow_y(Overflow::Hidden),
                 |ui| {
                     ui.add(Frame::new().width(600.0).height(32.0).shrink(0.0));
                     ui.add(
@@ -386,10 +472,13 @@ mod tests {
                             Style::column()
                                 .width(200.0)
                                 .height(100.0)
-                                .overflow_y(Overflow::Scroll),
+                                .overflow_y(Overflow::Auto),
                             |ui| {
                                 ui.frame(
-                                    Style::column().height(60.0).overflow_y(Overflow::Scroll),
+                                    Style::column()
+                                        .height(60.0)
+                                        .shrink(0.0)
+                                        .overflow_y(Overflow::Auto),
                                     |ui| {
                                         ui.add(Frame::canvas(
                                             |_, input| [input.width(), 600.0],
@@ -399,7 +488,7 @@ mod tests {
                                         ));
                                     },
                                 );
-                                ui.add(Frame::new().height(240.0));
+                                ui.add(Frame::new().height(240.0).shrink(0.0));
                             },
                         );
                     },
@@ -442,24 +531,27 @@ mod tests {
                                 Style::column()
                                     .width(100.0)
                                     .height(100.0)
-                                    .overflow_y(Overflow::Scroll),
+                                    .overflow_y(Overflow::Auto),
                                 |ui| {
                                     ui.frame(
-                                        Style::column().height(60.0).overflow_y(Overflow::Scroll),
+                                        Style::column()
+                                            .height(60.0)
+                                            .shrink(0.0)
+                                            .overflow_y(Overflow::Auto),
                                         |ui| {
                                             for _ in 0..20 {
-                                                ui.add(Frame::new().height(20.0));
+                                                ui.add(Frame::new().height(20.0).shrink(0.0));
                                             }
                                         },
                                     );
-                                    ui.add(Frame::new().height(200.0));
+                                    ui.add(Frame::new().height(200.0).shrink(0.0));
                                 },
                             );
                         })
                     },
                 )
                 .drop_without_applying_deltas();
-            row_positions.push((gui.last_layout[3].1.min.y, gui.last_layout[5].1.min.y));
+            row_positions.push((gui.last_layout[2].1.min.y, gui.last_layout[3].1.min.y));
         }
         assert_eq!(
             row_positions[0].0, row_positions[3].0,
@@ -468,6 +560,34 @@ mod tests {
         assert!(
             row_positions[3].1 < row_positions[0].1,
             "inner content did not scroll"
+        );
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use crate::{Overflow, Style};
+
+    #[test]
+    fn overflow_axes_normalize_together() {
+        assert_eq!(
+            Style::default()
+                .overflow_y(Overflow::Auto)
+                .effective_overflow(),
+            [Overflow::Auto; 2]
+        );
+        assert_eq!(
+            Style::default()
+                .overflow_x(Overflow::Clip)
+                .overflow_y(Overflow::Scroll)
+                .effective_overflow(),
+            [Overflow::Hidden, Overflow::Scroll]
+        );
+        assert_eq!(
+            Style::default()
+                .overflow_x(Overflow::Clip)
+                .effective_overflow(),
+            [Overflow::Clip, Overflow::Visible]
         );
     }
 }

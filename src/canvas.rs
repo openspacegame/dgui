@@ -44,7 +44,8 @@ impl MeasureInput {
 /// What a [`Frame::canvas`](crate::Frame::canvas) draw function receives:
 /// the frame's final geometry, its interaction, and a way to defer effects.
 pub struct Canvas<'a, 'frame> {
-    /// An egui `Ui` constrained and clipped to [`content_rect`](Self::content_rect).
+    /// An egui `Ui` positioned at [`content_rect`](Self::content_rect).
+    /// Clipping follows the frame and ancestor overflow policies.
     pub ui: &'a mut egui::Ui,
     /// An id that is stable across frames for this frame. Use it for the
     /// native egui widget this canvas reports with [`respond`](Self::respond).

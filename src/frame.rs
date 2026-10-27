@@ -1,6 +1,7 @@
 use crate::canvas::CanvasContent;
 use crate::{
-    Align, Callback, Canvas, Color, Direction, Justify, Length, MeasureInput, Overflow, Style, Ui,
+    Align, AlignContent, BoxSizing, Callback, Canvas, Color, Direction, Justify, Length,
+    MeasureInput, Overflow, Style, Ui,
 };
 
 type Children<'a> = Box<dyn FnOnce(&mut Ui<'_, 'a>) + 'a>;
@@ -34,7 +35,7 @@ type Children<'a> = Box<dyn FnOnce(&mut Ui<'_, 'a>) + 'a>;
 #[derive(Default)]
 pub struct Frame<'a> {
     pub(crate) style: Style,
-    pub(crate) canvas: Option<CanvasContent<'a>>,
+    pub(crate) content: crate::Content<'a>,
     pub(crate) children: Option<Children<'a>>,
     pub(crate) events: Events<'a>,
     pub(crate) clickable: bool,
@@ -65,7 +66,7 @@ macro_rules! lengths {
     )*};
 }
 impl<'a> Frame<'a> {
-    /// An empty frame with the default [`Style`]: an auto-sized column.
+    /// An empty frame with the default [`Style`]: an auto-sized row.
     pub fn new() -> Self {
         Self::default()
     }
@@ -75,7 +76,7 @@ impl<'a> Frame<'a> {
     /// current state scope. This replaces any canvas content (such as text);
     /// to combine text with other content, add a [`Frame::text`] child.
     pub fn children(mut self, children: impl FnOnce(&mut Ui<'_, 'a>) + 'a) -> Self {
-        self.canvas = None;
+        self.content = crate::Content::Empty;
         self.children = Some(Box::new(children));
         self
     }
@@ -105,7 +106,7 @@ impl<'a> Frame<'a> {
         draw: impl FnOnce(&mut Canvas<'_, 'a>) + 'a,
     ) -> Self {
         Self {
-            canvas: Some(CanvasContent {
+            content: crate::Content::Canvas(CanvasContent {
                 measure: Box::new(measure),
                 paint: Some(Box::new(draw)),
             }),
@@ -138,11 +139,20 @@ impl<'a> Frame<'a> {
         self
     }
 
-    setters! { direction: Direction, wrap: bool, gap: f32, margin: f32,
+    /// Set all margins, including auto.
+    pub fn margin(mut self, value: impl Into<Length>) -> Self {
+        self.style = self.style.margin(value);
+        self
+    }
+
+    setters! { direction: Direction, wrap: bool, gap: f32, row_gap: f32, column_gap: f32,
+    box_sizing: BoxSizing, align_self: Option<Align>, align_content: AlignContent,
+    padding_edges: [f32; 4], margin_edges: [Length; 4], overflow: Overflow,
+    padding_top: f32, padding_right: f32, padding_bottom: f32, padding_left: f32,
     grow: f32, shrink: f32, align: Align, justify: Justify, corner_radius: u8,
     overflow_x: Overflow, overflow_y: Overflow,
     background: Color, hover_background: Color, active_background: Color, focus_background: Color }
-    lengths! { width, height, min_width, min_height, max_width, max_height }
+    lengths! { basis, margin_top, margin_right, margin_bottom, margin_left, width, height, min_width, min_height, max_width, max_height }
     /// Draws a border of `width` points inside the frame's edges. The border
     /// takes up layout space, like padding.
     pub fn border(mut self, width: f32, color: Color) -> Self {

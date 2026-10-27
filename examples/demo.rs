@@ -10,6 +10,7 @@ fn card<'a>(ui: &mut Ui<'_, 'a>, key: u32) -> Frame<'a> {
     let name = ui.state("name", || format!("Pilot {key}"));
     let score = ui.state("score", || 0);
     Frame::new()
+        .direction(dgui::Direction::Column)
         .gap(12.0)
         .padding(18.0)
         .width(250.0)
@@ -53,7 +54,7 @@ impl eframe::App for Demo {
             let reverse: State<bool> = ui.state("reverse", || false);
             let second: State<bool> = ui.state("second", || true);
             let canvas_clicks = ui.state("canvas_clicks", || 0);
-            ui.add(Frame::new().gap(20.0).padding(24.0).width(Length::Percent(1.0))
+            ui.add(Frame::new().direction(dgui::Direction::Column).gap(20.0).padding(24.0).width(Length::Percent(1.0))
                 .min_height(Length::Percent(1.0)).shrink(0.0).background(Color::rgb(12, 18, 29))
                 .children(move |ui| {
                     ui.add(Frame::text("dgui / a fresh frame tree, every render cycle"));

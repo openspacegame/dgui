@@ -6,6 +6,7 @@ fn sign_in<'a>(ui: &mut Ui<'_, 'a>) -> Frame<'a> {
 
     // Fill the window and center the dialog on both axes.
     Frame::new()
+        .direction(dgui::Direction::Column)
         .width(Length::Percent(1.0))
         .height(Length::Percent(1.0))
         .align(Align::Center)
@@ -13,6 +14,7 @@ fn sign_in<'a>(ui: &mut Ui<'_, 'a>) -> Frame<'a> {
         .children(move |ui| {
             ui.add(
                 Frame::new()
+                    .direction(dgui::Direction::Column)
                     .width(360.0)
                     .max_width(Length::Percent(0.9))
                     .padding(24.0)
