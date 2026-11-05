@@ -61,6 +61,7 @@ pub enum TextAlign {
 #[derive(Clone)]
 pub struct Text {
     value: String,
+    width_samples: Option<std::sync::Arc<[String]>>,
     font: FontSelection,
     family: Option<FontFamily>,
     color: Option<Color32>,
@@ -75,6 +76,7 @@ impl Text {
     pub fn new(value: impl Into<String>) -> Self {
         Self {
             value: value.into(),
+            width_samples: None,
             font: FontSelection::Style(TextStyle::Body),
             family: None,
             color: None,
@@ -83,6 +85,14 @@ impl Text {
             overflow: TextOverflow::Clip,
             align: TextAlign::Start,
         }
+    }
+
+    /// Size this text column to the widest sample using this leaf's font.
+    /// Share the samples between rows to align a column without application
+    /// text measurement. Explicit layout widths still take precedence.
+    pub fn width_samples(mut self, samples: std::sync::Arc<[String]>) -> Self {
+        self.width_samples = Some(samples);
+        self
     }
 
     /// Select a semantic text style or an explicit font.
@@ -279,7 +289,16 @@ impl Text {
             AvailableSpace::Definite(width) => width,
         });
         let wrapped = self.wrapped(ctx, &text, width.max(0.0));
-        self.unwrapped(ctx, &wrapped).size().into()
+        let mut size = self.unwrapped(ctx, &wrapped).size();
+        if input.known[0].is_none() {
+            if let Some(samples) = &self.width_samples {
+                size.x = samples
+                    .iter()
+                    .map(|sample| self.unwrapped(ctx, sample).size().x)
+                    .fold(size.x, f32::max);
+            }
+        }
+        size.into()
     }
 
     pub(crate) fn paint(&self, ui: &mut egui::Ui, rect: egui::Rect, overflow: [Overflow; 2]) {
