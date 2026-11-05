@@ -4,6 +4,25 @@
 use crate::{Callback, FrameNode, Overflow, render};
 use egui::{Pos2, Rect};
 
+/// Observed geometry of one declarative scroll container, in logical points.
+#[derive(Clone, Copy, Debug)]
+pub struct ScrollInfo {
+    /// Positive displacement from the beginning of the content.
+    pub offset: egui::Vec2,
+    /// Visible content rectangle in screen coordinates.
+    pub viewport: egui::Rect,
+    /// Complete extent, including content outside the viewport.
+    pub content_size: egui::Vec2,
+}
+
+impl ScrollInfo {
+    /// Whether the viewport reaches the bottom of the content. Short content
+    /// is already at the bottom; tolerate subpixel layout rounding.
+    pub fn at_bottom(self) -> bool {
+        self.offset.y + self.viewport.height() >= self.content_size.y - 1.0
+    }
+}
+
 /// Clip only the axes that establish an overflow boundary.
 pub fn content_clip(parent: Rect, padding_box: Rect, overflow: [Overflow; 2]) -> Rect {
     let mut clip = parent;
@@ -18,11 +37,18 @@ pub fn content_clip(parent: Rect, padding_box: Rect, overflow: [Overflow; 2]) ->
     clip
 }
 
-fn scroll_area(id: egui::Id, axes: [bool; 2], visibility: Overflow) -> egui::ScrollArea {
+fn scroll_area(
+    id: egui::Id,
+    axes: [bool; 2],
+    visibility: Overflow,
+    follow_end: [bool; 2],
+) -> egui::ScrollArea {
     use egui::scroll_area::{ScrollBarVisibility, ScrollSource};
     egui::ScrollArea::new(axes)
         .id_salt(id)
         .auto_shrink([false, false])
+        .stick_to_right(follow_end[0])
+        .stick_to_bottom(follow_end[1])
         .scroll_bar_visibility(match visibility {
             Overflow::Scroll => ScrollBarVisibility::AlwaysVisible,
             Overflow::Hidden => ScrollBarVisibility::AlwaysHidden,
@@ -98,6 +124,7 @@ impl Drawing<'_, '_> {
         if axes.iter().any(|&enabled| enabled) {
             let id = node.id;
             let enabled = node.enabled;
+            let follow_end = node.follow_scroll_end;
             let mut viewport = host.new_child(
                 egui::UiBuilder::new()
                     .id_salt(id.with("viewport"))
@@ -109,33 +136,59 @@ impl Drawing<'_, '_> {
             }
             // Separate native areas preserve independently requested scrollbar
             // policies. Both receive the same finite viewport extent.
-            if axes == [true, true] && overflow[0] != overflow[1] {
-                scroll_area(id.with("scroll-x"), [true, false], overflow[0]).show_viewport(
-                    &mut viewport,
-                    |horizontal, x_view| {
-                        horizontal.set_width(x_view.width());
-                        scroll_area(id.with("scroll-y"), [false, true], overflow[1])
+            let info = if axes == [true, true] && overflow[0] != overflow[1] {
+                let horizontal =
+                    scroll_area(id.with("scroll-x"), [true, false], overflow[0], follow_end)
+                        .show_viewport(&mut viewport, |horizontal, x_view| {
+                            horizontal.set_width(x_view.width());
+                            let vertical = scroll_area(
+                                id.with("scroll-y"),
+                                [false, true],
+                                overflow[1],
+                                follow_end,
+                            )
                             .max_height(content_rect.height())
-                            .show_viewport(horizontal, |content, y_view| {
-                                self.draw_scrolled(
-                                    content,
-                                    index,
-                                    y_view.size(),
-                                    inset,
-                                    rect,
-                                    parent_clip,
-                                );
-                            });
-                    },
-                );
+                            .show_viewport(
+                                horizontal,
+                                |content, y_view| {
+                                    self.draw_scrolled(
+                                        content,
+                                        index,
+                                        y_view.size(),
+                                        inset,
+                                        rect,
+                                        parent_clip,
+                                    );
+                                },
+                            );
+                            ScrollInfo {
+                                offset: vertical.state.offset,
+                                viewport: vertical.inner_rect,
+                                content_size: vertical.content_size,
+                            }
+                        });
+                ScrollInfo {
+                    offset: egui::vec2(horizontal.state.offset.x, horizontal.inner.offset.y),
+                    content_size: egui::vec2(
+                        horizontal.content_size.x,
+                        horizontal.inner.content_size.y,
+                    ),
+                    ..horizontal.inner
+                }
             } else {
                 let visibility = if axes[0] { overflow[0] } else { overflow[1] };
-                scroll_area(id.with("scroll"), axes, visibility).show_viewport(
-                    &mut viewport,
-                    |content, view| {
+                let output = scroll_area(id.with("scroll"), axes, visibility, follow_end)
+                    .show_viewport(&mut viewport, |content, view| {
                         self.draw_scrolled(content, index, view.size(), inset, rect, parent_clip);
-                    },
-                );
+                    });
+                ScrollInfo {
+                    offset: output.state.offset,
+                    viewport: output.inner_rect,
+                    content_size: output.content_size,
+                }
+            };
+            if let Some(callback) = self.nodes[index].events.scroll.take() {
+                self.callbacks.push(Box::new(move || callback(info)));
             }
         } else {
             for child in children {
@@ -588,6 +641,82 @@ mod policy_tests {
                 .overflow_x(Overflow::Clip)
                 .effective_overflow(),
             [Overflow::Clip, Overflow::Visible]
+        );
+    }
+
+    #[test]
+    fn following_history_respects_manual_scrolling_and_short_content_alignment() {
+        use crate::{Dgui, Frame};
+        let context = egui::Context::default();
+        context.options_mut(|options| options.max_passes = 1.try_into().unwrap());
+        let mut gui = Dgui::new();
+        let observed = std::cell::Cell::new(None::<super::ScrollInfo>);
+        let last_row = std::cell::Cell::new(egui::Rect::NOTHING);
+        let mut draw = |rows: usize, events: Vec<egui::Event>| {
+            context
+                .run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(400.0, 300.0),
+                        )),
+                        events,
+                        ..Default::default()
+                    },
+                    |host| {
+                        gui.show(host, |ui| {
+                            ui.add(
+                                Frame::new()
+                                    .direction(crate::Direction::Column)
+                                    .height(100.0)
+                                    .overflow_y(Overflow::Auto)
+                                    .follow_scroll_end([false, true])
+                                    .on_scroll(|info| observed.set(Some(info)))
+                                    .children(|ui| {
+                                        ui.add(Frame::new().grow(1.0).basis(0.0).min_height(0.0));
+                                        for row in 0..rows {
+                                            let last_row = &last_row;
+                                            ui.add(
+                                                Frame::new().height(30.0).shrink(0.0).on_response(
+                                                    move |response| {
+                                                        if row + 1 == rows {
+                                                            last_row.set(response.rect);
+                                                        }
+                                                    },
+                                                ),
+                                            );
+                                        }
+                                    }),
+                            );
+                        });
+                    },
+                )
+                .drop_without_applying_deltas();
+            observed.get().unwrap()
+        };
+        let short = draw(1, vec![]);
+        assert!(short.at_bottom());
+        assert!((short.viewport.bottom() - last_row.get().bottom()).abs() < 1.0);
+        draw(12, vec![]);
+        let long = draw(12, vec![]);
+        assert!(long.at_bottom());
+        assert!(long.offset.y > 0.0);
+        draw(
+            12,
+            vec![
+                egui::Event::PointerMoved(long.viewport.center()),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    phase: egui::TouchPhase::Move,
+                    delta: egui::vec2(0.0, 150.0),
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        let reading = draw(16, vec![]);
+        assert!(
+            !reading.at_bottom(),
+            "new messages must not drag the reader away from older history"
         );
     }
 }

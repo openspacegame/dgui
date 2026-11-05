@@ -92,6 +92,7 @@ pub use builtins::{button, text_input};
 pub use canvas::{AvailableSpace, Canvas, MeasureInput};
 use frame::Events;
 pub use frame::Frame;
+pub use scroll::ScrollInfo;
 pub use state::{State, StateRead};
 pub use style::{
     Align, AlignContent, BoxSizing, Color, Direction, Justify, Length, Overflow, Style,
@@ -125,6 +126,7 @@ struct FrameNode<'a> {
     id: egui::Id,
     children: Vec<usize>,
     style: Style,
+    follow_scroll_end: [bool; 2],
     content: Content<'a>,
     events: Events<'a>,
     clickable: bool,
@@ -312,6 +314,7 @@ impl<'frame> Ui<'_, 'frame> {
             id,
             children: Vec::new(),
             style: frame.style,
+            follow_scroll_end: frame.follow_scroll_end,
             content: frame.content,
             events: frame.events,
             clickable: frame.clickable,
@@ -429,6 +432,7 @@ impl Dgui {
                 id: egui::Id::new((self.id, "root")),
                 children: Vec::new(),
                 style,
+                follow_scroll_end: [false; 2],
                 content: Content::Empty,
                 events: Events::default(),
                 clickable: false,

@@ -35,6 +35,7 @@ type Children<'a> = Box<dyn FnOnce(&mut Ui<'_, 'a>) + 'a>;
 #[derive(Default)]
 pub struct Frame<'a> {
     pub(crate) style: Style,
+    pub(crate) follow_scroll_end: [bool; 2],
     pub(crate) content: crate::Content<'a>,
     pub(crate) children: Option<Children<'a>>,
     pub(crate) events: Events<'a>,
@@ -51,6 +52,7 @@ pub(crate) struct Events<'a> {
     pub focus: Option<Callback<'a>>,
     pub blur: Option<Callback<'a>>,
     pub response: Option<Box<dyn FnOnce(egui::Response) + 'a>>,
+    pub scroll: Option<Box<dyn FnOnce(crate::ScrollInfo) + 'a>>,
 }
 
 macro_rules! setters {
@@ -222,6 +224,25 @@ impl<'a> Frame<'a> {
         self.accessibility_label = Some(label.into());
         self
     }
+    /// Follow growing scroll content on the horizontal and vertical axes while
+    /// the reader remains at that axis's end. Manual scrolling away suspends
+    /// following until the reader returns to the end.
+    ///
+    /// This controls the scroll offset, not alignment of short content. Use a
+    /// growing spacer or an auto margin to align content within its viewport.
+    pub fn follow_scroll_end(mut self, axes: [bool; 2]) -> Self {
+        self.follow_scroll_end = axes;
+        self
+    }
+
+    /// Observe this frame's actual scroll viewport after drawing. Called only
+    /// for frames whose overflow establishes a scroll container, including
+    /// when their content fits. The callback runs with other frame callbacks.
+    pub fn on_scroll(mut self, callback: impl FnOnce(crate::ScrollInfo) + 'a) -> Self {
+        self.events.scroll = Some(Box::new(callback));
+        self
+    }
+
     /// Runs `callback` after drawing with this frame's egui [`Response`](egui::Response),
     /// combined with the response of any native control its canvas reported.
     ///
