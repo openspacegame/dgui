@@ -42,11 +42,13 @@ fn scroll_area(
     axes: [bool; 2],
     visibility: Overflow,
     follow_end: [bool; 2],
+    offset: egui::Vec2,
 ) -> egui::ScrollArea {
     use egui::scroll_area::{ScrollBarVisibility, ScrollSource};
     egui::ScrollArea::new(axes)
         .id_salt(id)
         .auto_shrink([false, false])
+        .scroll_offset(offset)
         .stick_to_right(follow_end[0])
         .stick_to_bottom(follow_end[1])
         .scroll_bar_visibility(match visibility {
@@ -125,6 +127,29 @@ impl Drawing<'_, '_> {
             let id = node.id;
             let enabled = node.enabled;
             let follow_end = node.follow_scroll_end;
+            // Native ScrollArea applies sticky offsets after painting. Use the
+            // current layout and the previous observed end position before painting.
+            let history_id = id.with("scroll-geometry");
+            let previous = host
+                .ctx()
+                .data(|data| data.get_temp::<ScrollInfo>(history_id));
+            let content_size = egui::vec2(
+                layout.content_size.width - inset.x - layout.padding.right,
+                layout.content_size.height - inset.y - layout.padding.bottom,
+            )
+            .max(content_rect.size());
+            let maximum = (content_size - content_rect.size()).max(egui::Vec2::ZERO);
+            let mut offset = previous.map_or(egui::Vec2::ZERO, |info| info.offset);
+            for axis in 0..2 {
+                let following = previous.is_none_or(|info| {
+                    info.offset[axis] + info.viewport.size()[axis] >= info.content_size[axis] - 1.0
+                });
+                if follow_end[axis] && following {
+                    offset[axis] = maximum[axis];
+                } else {
+                    offset[axis] = offset[axis].min(maximum[axis]);
+                }
+            }
             let mut viewport = host.new_child(
                 egui::UiBuilder::new()
                     .id_salt(id.with("viewport"))
@@ -137,36 +162,32 @@ impl Drawing<'_, '_> {
             // Separate native areas preserve independently requested scrollbar
             // policies. Both receive the same finite viewport extent.
             let info = if axes == [true, true] && overflow[0] != overflow[1] {
-                let horizontal =
-                    scroll_area(id.with("scroll-x"), [true, false], overflow[0], follow_end)
-                        .show_viewport(&mut viewport, |horizontal, x_view| {
-                            horizontal.set_width(x_view.width());
-                            let vertical = scroll_area(
-                                id.with("scroll-y"),
-                                [false, true],
-                                overflow[1],
-                                follow_end,
-                            )
-                            .max_height(content_rect.height())
-                            .show_viewport(
-                                horizontal,
-                                |content, y_view| {
-                                    self.draw_scrolled(
-                                        content,
-                                        index,
-                                        y_view.size(),
-                                        inset,
-                                        rect,
-                                        parent_clip,
-                                    );
-                                },
-                            );
-                            ScrollInfo {
-                                offset: vertical.state.offset,
-                                viewport: vertical.inner_rect,
-                                content_size: vertical.content_size,
-                            }
-                        });
+                let horizontal = scroll_area(
+                    id.with("scroll-x"),
+                    [true, false],
+                    overflow[0],
+                    follow_end,
+                    offset,
+                )
+                .show_viewport(&mut viewport, |horizontal, x_view| {
+                    horizontal.set_width(x_view.width());
+                    let vertical = scroll_area(
+                        id.with("scroll-y"),
+                        [false, true],
+                        overflow[1],
+                        follow_end,
+                        offset,
+                    )
+                    .max_height(content_rect.height())
+                    .show_viewport(horizontal, |content, y_view| {
+                        self.draw_scrolled(content, index, y_view.size(), inset, rect, parent_clip);
+                    });
+                    ScrollInfo {
+                        offset: vertical.state.offset,
+                        viewport: vertical.inner_rect,
+                        content_size: vertical.content_size,
+                    }
+                });
                 ScrollInfo {
                     offset: egui::vec2(horizontal.state.offset.x, horizontal.inner.offset.y),
                     content_size: egui::vec2(
@@ -177,7 +198,7 @@ impl Drawing<'_, '_> {
                 }
             } else {
                 let visibility = if axes[0] { overflow[0] } else { overflow[1] };
-                let output = scroll_area(id.with("scroll"), axes, visibility, follow_end)
+                let output = scroll_area(id.with("scroll"), axes, visibility, follow_end, offset)
                     .show_viewport(&mut viewport, |content, view| {
                         self.draw_scrolled(content, index, view.size(), inset, rect, parent_clip);
                     });
@@ -187,6 +208,8 @@ impl Drawing<'_, '_> {
                     content_size: output.content_size,
                 }
             };
+            host.ctx()
+                .data_mut(|data| data.insert_temp(history_id, info));
             if let Some(callback) = self.nodes[index].events.scroll.take() {
                 self.callbacks.push(Box::new(move || callback(info)));
             }
@@ -248,10 +271,11 @@ impl Drawing<'_, '_> {
             self.draw(content, child, origin, content.clip_rect());
         }
         // Taffy's overflow extent includes visible overflow from descendants
-        // and stops at nested clipping/scrolling boundaries.
+        // and stops at nested clipping/scrolling boundaries. Its trailing padding
+        // is outside the native content viewport, just like its leading inset.
         content.set_min_size(egui::vec2(
-            (layout.content_size.width - inset.x).max(extent.x),
-            (layout.content_size.height - inset.y).max(extent.y),
+            (layout.content_size.width - inset.x - layout.padding.right).max(extent.x),
+            (layout.content_size.height - inset.y - layout.padding.bottom).max(extent.y),
         ));
     }
 
@@ -669,6 +693,7 @@ mod policy_tests {
                                 Frame::new()
                                     .direction(crate::Direction::Column)
                                     .height(100.0)
+                                    .padding(10.0)
                                     .overflow_y(Overflow::Auto)
                                     .follow_scroll_end([false, true])
                                     .on_scroll(|info| observed.set(Some(info)))
@@ -696,9 +721,10 @@ mod policy_tests {
         };
         let short = draw(1, vec![]);
         assert!(short.at_bottom());
+        assert_eq!(short.offset.y, 0.0, "short content must not scroll");
         assert!((short.viewport.bottom() - last_row.get().bottom()).abs() < 1.0);
-        draw(12, vec![]);
         let long = draw(12, vec![]);
+        assert!((long.viewport.bottom() - last_row.get().bottom()).abs() < 1.0);
         assert!(long.at_bottom());
         assert!(long.offset.y > 0.0);
         draw(
