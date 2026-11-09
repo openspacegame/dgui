@@ -486,11 +486,19 @@ impl Dgui {
                 nodes: tree
                     .nodes
                     .iter()
-                    .map(|node| (node.style.clone(), node.children.clone()))
+                    .map(|node| LayoutInput {
+                        style: node.style.clone(),
+                        children: node.children.clone(),
+                        text: match &node.content {
+                            Content::Text(text) => Some(text.clone()),
+                            _ => None,
+                        },
+                    })
                     .collect(),
                 measurements,
                 layouts: layouts.clone(),
                 reflows: Vec::new(),
+                typography: Some(Typography::new(host.ctx())),
             };
             layouts
         };
@@ -531,10 +539,11 @@ impl Dgui {
 #[derive(Default)]
 struct LayoutCache {
     size: [f32; 2],
-    nodes: Vec<(Style, Vec<usize>)>,
+    nodes: Vec<LayoutInput>,
     measurements: Vec<Measurement>,
     layouts: Vec<taffy::Layout>,
     reflows: Vec<ScrollLayout>,
+    typography: Option<Typography>,
 }
 
 impl LayoutCache {
@@ -550,17 +559,27 @@ impl LayoutCache {
                 .nodes
                 .iter()
                 .zip(nodes)
-                .any(|((style, children), node)| *style != node.style || *children != node.children)
+                .any(|(input, node)| input.style != node.style || input.children != node.children)
         {
             return None;
         }
-        // Canvas closures may capture new data on every draw. Re-evaluate the
-        // constraints that established this geometry rather than caching closures.
+        let same_typography = self
+            .typography
+            .as_ref()
+            .is_some_and(|old| old.matches(context));
+        // Text has explicit inputs. An unchanged leaf under the same typography
+        // keeps its measurements; canvas closures still need to be evaluated.
         for measurement in self
             .measurements
             .iter()
             .chain(self.reflows.iter().flat_map(|reflow| &reflow.measurements))
         {
+            if same_typography
+                && let Content::Text(text) = &nodes[measurement.index].content
+                && self.nodes[measurement.index].text.as_ref() == Some(text)
+            {
+                continue;
+            }
             if measure(
                 &nodes[measurement.index],
                 context,
@@ -572,6 +591,57 @@ impl LayoutCache {
             }
         }
         Some(self.layouts.clone())
+    }
+}
+
+struct LayoutInput {
+    style: Style,
+    children: Vec<usize>,
+    text: Option<Text>,
+}
+
+struct Typography {
+    style: std::sync::Arc<egui::Style>,
+    definitions: egui::FontDefinitions,
+    options: egui::epaint::text::TextOptions,
+    pixels_per_point: f32,
+}
+
+impl Typography {
+    fn new(context: &egui::Context) -> Self {
+        let (definitions, options) =
+            context.fonts(|fonts| (fonts.definitions().clone(), *fonts.options()));
+        Self {
+            style: context.global_style(),
+            definitions,
+            options,
+            pixels_per_point: context.pixels_per_point(),
+        }
+    }
+
+    fn matches(&self, context: &egui::Context) -> bool {
+        let style = context.global_style();
+        if self.pixels_per_point != context.pixels_per_point()
+            || self.style.text_styles != style.text_styles
+            || self.style.override_font_id != style.override_font_id
+            || self.style.override_text_style != style.override_text_style
+        {
+            return false;
+        }
+        context.fonts(|fonts| {
+            let definitions = fonts.definitions();
+            self.options == *fonts.options()
+                && self.definitions.families == definitions.families
+                && self.definitions.font_data.len() == definitions.font_data.len()
+                && self
+                    .definitions
+                    .font_data
+                    .iter()
+                    .zip(&definitions.font_data)
+                    .all(|((old_name, old_data), (name, data))| {
+                        old_name == name && std::sync::Arc::ptr_eq(old_data, data)
+                    })
+        })
     }
 }
 

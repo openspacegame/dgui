@@ -1065,3 +1065,44 @@ fn visible_overflow_remains_interactive_until_an_ancestor_clips() {
         assert_eq!(clicks.get(), expected);
     }
 }
+
+#[test]
+fn text_geometry_tracks_content_styles_scale_and_replaced_fonts() {
+    let ctx = context();
+    let mut gui = Dgui::new();
+    let draw = |gui: &mut Dgui, text: &str| {
+        run(&ctx, gui, [200.0, 300.0], vec![], |ui| {
+            ui.add(Text::new(text).frame().width(90.0));
+        });
+        gui.last_layout[1].1.size()
+    };
+    let check = |gui: &mut Dgui, text: &str| {
+        let actual = draw(gui, text);
+        let expected = draw(&mut Dgui::new(), text);
+        assert_eq!(actual, expected);
+    };
+
+    check(&mut gui, "alpha beta");
+    check(&mut gui, "alpha beta");
+    check(&mut gui, "alpha beta gamma delta");
+
+    ctx.all_styles_mut(|style| {
+        style
+            .text_styles
+            .get_mut(&egui::TextStyle::Body)
+            .unwrap()
+            .size = 22.0;
+    });
+    check(&mut gui, "alpha beta gamma delta");
+    ctx.set_pixels_per_point(1.25);
+    check(&mut gui, "alpha beta gamma delta");
+
+    let mut definitions = ctx.fonts(|fonts| fonts.definitions().clone());
+    let proportional = definitions.families[&egui::FontFamily::Proportional][0].clone();
+    let monospace = &definitions.families[&egui::FontFamily::Monospace][0];
+    definitions
+        .font_data
+        .insert(proportional, definitions.font_data[monospace].clone());
+    ctx.set_fonts(definitions);
+    check(&mut gui, "alpha beta gamma delta");
+}

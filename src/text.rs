@@ -351,6 +351,26 @@ impl Text {
     }
 }
 
+impl PartialEq for Text {
+    fn eq(&self, other: &Self) -> bool {
+        let same_font = match (&self.font, &other.font) {
+            (FontSelection::Default, FontSelection::Default) => true,
+            (FontSelection::FontId(a), FontSelection::FontId(b)) => a == b,
+            (FontSelection::Style(a), FontSelection::Style(b)) => a == b,
+            _ => false,
+        };
+        same_font
+            && self.value == other.value
+            && self.width_samples == other.width_samples
+            && self.family == other.family
+            && self.color == other.color
+            && self.whitespace == other.whitespace
+            && self.wrapping == other.wrapping
+            && self.overflow == other.overflow
+            && self.align == other.align
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
