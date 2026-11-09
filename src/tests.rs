@@ -47,6 +47,31 @@ fn pointer(pos: egui::Pos2, pressed: bool) -> Vec<egui::Event> {
 }
 
 #[test]
+fn disabled_tree_preserves_host_opacity() {
+    let ctx = context();
+    let mut gui = Dgui::new();
+    ctx.run_ui(
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(400.0, 300.0),
+            )),
+            ..Default::default()
+        },
+        |host| {
+            host.disable();
+            let opacity = host.painter().opacity();
+            gui.show(host, |ui| {
+                ui.add(Frame::text("First"));
+                ui.add(Frame::text("Second"));
+            });
+            assert_eq!(host.painter().opacity(), opacity);
+        },
+    )
+    .drop_without_applying_deltas();
+}
+
+#[test]
 fn frame_clipping_preserves_native_controls_outside_the_tree() {
     let ctx = context();
     let mut gui = Dgui::new();

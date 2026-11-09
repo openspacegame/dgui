@@ -745,7 +745,7 @@ fn render<'a>(
     // Text and decoration paint into explicit rectangles. Native canvases
     // need their own layout cursor, as do frames changing the enabled state.
     let mut child =
-        if matches!(&node.content, Content::Canvas(_)) || node.enabled != host.is_enabled() {
+        if matches!(&node.content, Content::Canvas(_)) || !node.enabled || !host.is_enabled() {
             Some(
                 host.new_child(
                     egui::UiBuilder::new()
