@@ -742,6 +742,8 @@ fn render<'a>(
     if node.layout_only() {
         return;
     }
+    let profile_kind = match &node.content { Content::Text(_) => 0, Content::Empty => 1, Content::Canvas(_) => 2 };
+    let profile_setup = std::time::Instant::now();
     let mut ui = host.new_child(
         egui::UiBuilder::new()
             .id_salt(node.id)
@@ -794,6 +796,8 @@ fn render<'a>(
         );
     }
     ui.set_clip_rect(clip);
+    let profile_setup_ns = profile_setup.elapsed().as_nanos() as u64;
+    let profile_content = std::time::Instant::now();
     if let Content::Text(text) = &node.content {
         response.widget_info(|| {
             egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), text.value())
@@ -815,6 +819,8 @@ fn render<'a>(
     {
         paint(&mut canvas_context);
     }
+    let profile_content_ns = profile_content.elapsed().as_nanos() as u64;
+    let profile_finish = std::time::Instant::now();
     let content_response = canvas_context.content_response.take();
     let clicked = response.clicked() || content_response.as_ref().is_some_and(|r| r.clicked());
     let hovered = response.hovered() || content_response.as_ref().is_some_and(|r| r.hovered());
@@ -844,6 +850,16 @@ fn render<'a>(
             .callbacks
             .push(Box::new(move || callback(combined)));
     }
+    let profile_finish_ns = profile_finish.elapsed().as_nanos() as u64;
+    host.ctx().data_mut(|data| {
+        let totals = data.get_temp_mut_or_default::<[u64; 12]>(egui::Id::new("dgui-profile-node"));
+        let base = profile_kind * 4;
+        totals[base] += profile_setup_ns;
+        totals[base + 1] += profile_content_ns;
+        totals[base + 2] += profile_finish_ns;
+        totals[base + 3] += 1;
+    });
+
 }
 
 #[cfg(test)]
