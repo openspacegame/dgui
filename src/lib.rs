@@ -467,29 +467,7 @@ impl Dgui {
         {
             layouts
         } else {
-            ids = tree
-                .nodes
-                .iter()
-                .enumerate()
-                .map(|(index, node)| {
-                    layout
-                        .new_leaf_with_context(node.style.taffy(), index)
-                        .unwrap()
-                })
-                .collect();
-            for (index, node) in tree.nodes.iter().enumerate() {
-                let children: Vec<_> = node.children.iter().map(|&child| ids[child]).collect();
-                layout.set_children(ids[index], &children).unwrap();
-            }
-            // Native scroll containers can reflow during drawing. Their layout
-            // stays transient; independent runtimes inside canvas leaves can cache.
-            let cacheable = tree.nodes.iter().all(|node| {
-                !node
-                    .style
-                    .effective_overflow()
-                    .iter()
-                    .any(|value| value.is_scroll_container())
-            });
+            ids = layout_nodes(&mut layout, &tree.nodes);
             let mut measurements = Vec::new();
             compute_layout(
                 &mut layout,
@@ -500,23 +478,20 @@ impl Dgui {
                 },
                 &tree.nodes,
                 host.ctx(),
-                cacheable.then_some(&mut measurements),
+                Some(&mut measurements),
             );
             let layouts: Vec<_> = ids.iter().map(|&id| *layout.layout(id).unwrap()).collect();
-            if cacheable {
-                self.layout_cache = LayoutCache {
-                    size,
-                    nodes: tree
-                        .nodes
-                        .iter()
-                        .map(|node| (node.style.clone(), node.children.clone()))
-                        .collect(),
-                    measurements,
-                    layouts: layouts.clone(),
-                };
-            } else {
-                self.layout_cache = LayoutCache::default();
-            }
+            self.layout_cache = LayoutCache {
+                size,
+                nodes: tree
+                    .nodes
+                    .iter()
+                    .map(|node| (node.style.clone(), node.children.clone()))
+                    .collect(),
+                measurements,
+                layouts: layouts.clone(),
+                reflows: Vec::new(),
+            };
             layouts
         };
         let mut callbacks: Vec<Callback<'frame>> = Vec::new();
@@ -524,7 +499,8 @@ impl Dgui {
             nodes: &mut tree.nodes,
             layouts,
             layout: &mut layout,
-            ids: &ids,
+            ids: &mut ids,
+            reflows: &mut self.layout_cache.reflows,
             callbacks: &mut callbacks,
             #[cfg(test)]
             rectangles: Vec::new(),
@@ -558,6 +534,7 @@ struct LayoutCache {
     nodes: Vec<(Style, Vec<usize>)>,
     measurements: Vec<Measurement>,
     layouts: Vec<taffy::Layout>,
+    reflows: Vec<ScrollLayout>,
 }
 
 impl LayoutCache {
@@ -579,7 +556,11 @@ impl LayoutCache {
         }
         // Canvas closures may capture new data on every draw. Re-evaluate the
         // constraints that established this geometry rather than caching closures.
-        for measurement in &self.measurements {
+        for measurement in self
+            .measurements
+            .iter()
+            .chain(self.reflows.iter().flat_map(|reflow| &reflow.measurements))
+        {
             if measure(
                 &nodes[measurement.index],
                 context,
@@ -599,6 +580,30 @@ struct Measurement {
     known: Size<Option<f32>>,
     available: Size<TaffyAvailableSpace>,
     result: Size<f32>,
+}
+
+struct ScrollLayout {
+    root: usize,
+    size: egui::Vec2,
+    layouts: Vec<(usize, taffy::Layout)>,
+    measurements: Vec<Measurement>,
+}
+
+fn layout_nodes(layout: &mut TaffyTree<usize>, nodes: &[FrameNode<'_>]) -> Vec<taffy::NodeId> {
+    let ids: Vec<_> = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| {
+            layout
+                .new_leaf_with_context(node.style.taffy(), index)
+                .unwrap()
+        })
+        .collect();
+    for (index, node) in nodes.iter().enumerate() {
+        let children: Vec<_> = node.children.iter().map(|&child| ids[child]).collect();
+        layout.set_children(ids[index], &children).unwrap();
+    }
+    ids
 }
 
 // Define the measurement closure outside generic UI builders so Taffy's layout

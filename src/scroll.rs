@@ -67,7 +67,8 @@ pub struct Drawing<'a, 'frame> {
     pub nodes: &'a mut [FrameNode<'frame>],
     pub layouts: Vec<taffy::Layout>,
     pub layout: &'a mut taffy::TaffyTree<usize>,
-    pub ids: &'a [taffy::NodeId],
+    pub ids: &'a mut Vec<taffy::NodeId>,
+    pub reflows: &'a mut Vec<crate::ScrollLayout>,
     pub callbacks: &'a mut Vec<Callback<'frame>>,
     #[cfg(test)]
     pub rectangles: Vec<(egui::Id, Rect)>,
@@ -281,6 +282,21 @@ impl Drawing<'_, '_> {
 
     fn reflow(&mut self, context: &egui::Context, root: usize, size: egui::Vec2) {
         use taffy::{AvailableSpace, Dimension, Size};
+        if let Some(cached) = self
+            .reflows
+            .iter()
+            .find(|cached| cached.root == root && cached.size == size)
+        {
+            for &(index, layout) in &cached.layouts {
+                self.layouts[index] = layout;
+            }
+            return;
+        }
+        // Root geometry may have been reused without constructing a Taffy tree.
+        // A changed native viewport needs only its own subtree laid out again.
+        if self.ids.is_empty() {
+            *self.ids = crate::layout_nodes(self.layout, self.nodes);
+        }
         let id = self.ids[root];
         let mut style = self.layout.style(id).unwrap().clone();
         // Preserve the parent's allocated border box while accounting for the
@@ -293,6 +309,7 @@ impl Drawing<'_, '_> {
         style.min_size = style.size;
         style.max_size = style.size;
         self.layout.set_style(id, style).unwrap();
+        let mut measurements = Vec::new();
         crate::compute_layout(
             self.layout,
             id,
@@ -302,13 +319,22 @@ impl Drawing<'_, '_> {
             },
             self.nodes,
             context,
-            None,
+            Some(&mut measurements),
         );
+        let mut layouts = Vec::new();
         let mut pending = vec![root];
         while let Some(index) = pending.pop() {
             self.layouts[index] = *self.layout.layout(self.ids[index]).unwrap();
+            layouts.push((index, self.layouts[index]));
             pending.extend_from_slice(&self.nodes[index].children);
         }
+        self.reflows.retain(|cached| cached.root != root);
+        self.reflows.push(crate::ScrollLayout {
+            root,
+            size,
+            layouts,
+            measurements,
+        });
     }
 }
 
@@ -507,73 +533,77 @@ mod tests {
         let mut gui = Dgui::new();
         let native_width = std::cell::Cell::new(0.0);
         let nested_width = std::cell::Cell::new(0.0);
-        for _ in 0..3 {
-            context
-                .run_ui(
-                    egui::RawInput {
-                        screen_rect: Some(egui::Rect::from_min_size(
-                            egui::Pos2::ZERO,
-                            egui::vec2(500.0, 400.0),
-                        )),
-                        ..Default::default()
-                    },
-                    |host| {
-                        let mut reference =
-                            host.new_child(egui::UiBuilder::new().id_salt("reference").max_rect(
-                                egui::Rect::from_min_size(
-                                    egui::pos2(250.0, 0.0),
-                                    egui::vec2(200.0, 100.0),
-                                ),
-                            ));
-                        egui::ScrollArea::vertical()
-                            .auto_shrink([false, false])
-                            .show(&mut reference, |outer| {
-                                let mut inner = outer.new_child(
-                                    egui::UiBuilder::new().id_salt("inner").max_rect(
-                                        egui::Rect::from_min_size(
-                                            outer.next_widget_position(),
-                                            egui::vec2(outer.available_width(), 60.0),
-                                        ),
+        for bar_width in [8.0, 18.0] {
+            context.all_styles_mut(|style| style.spacing.scroll.bar_width = bar_width);
+            for _ in 0..3 {
+                context
+                    .run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(500.0, 400.0),
+                            )),
+                            ..Default::default()
+                        },
+                        |host| {
+                            let mut reference = host.new_child(
+                                egui::UiBuilder::new().id_salt("reference").max_rect(
+                                    egui::Rect::from_min_size(
+                                        egui::pos2(250.0, 0.0),
+                                        egui::vec2(200.0, 100.0),
                                     ),
-                                );
-                                egui::ScrollArea::vertical()
-                                    .auto_shrink([false, false])
-                                    .show(&mut inner, |content| {
-                                        native_width.set(content.available_width());
-                                        content.set_min_height(600.0);
-                                    });
-                                outer.set_min_height(300.0);
-                            });
-                        gui.show_styled(
-                            host,
-                            Style::column()
-                                .width(200.0)
-                                .height(100.0)
-                                .overflow_y(Overflow::Auto),
-                            |ui| {
-                                ui.frame(
-                                    Style::column()
-                                        .height(60.0)
-                                        .shrink(0.0)
-                                        .overflow_y(Overflow::Auto),
-                                    |ui| {
-                                        ui.add(Frame::canvas(
-                                            |_, input| [input.width(), 600.0],
-                                            |canvas| {
-                                                nested_width.set(canvas.content_rect.width());
-                                            },
-                                        ));
-                                    },
-                                );
-                                ui.add(Frame::new().height(240.0).shrink(0.0));
-                            },
-                        );
-                    },
-                )
-                .drop_without_applying_deltas();
+                                ),
+                            );
+                            egui::ScrollArea::vertical()
+                                .auto_shrink([false, false])
+                                .show(&mut reference, |outer| {
+                                    let mut inner = outer.new_child(
+                                        egui::UiBuilder::new().id_salt("inner").max_rect(
+                                            egui::Rect::from_min_size(
+                                                outer.next_widget_position(),
+                                                egui::vec2(outer.available_width(), 60.0),
+                                            ),
+                                        ),
+                                    );
+                                    egui::ScrollArea::vertical()
+                                        .auto_shrink([false, false])
+                                        .show(&mut inner, |content| {
+                                            native_width.set(content.available_width());
+                                            content.set_min_height(600.0);
+                                        });
+                                    outer.set_min_height(300.0);
+                                });
+                            gui.show_styled(
+                                host,
+                                Style::column()
+                                    .width(200.0)
+                                    .height(100.0)
+                                    .overflow_y(Overflow::Auto),
+                                |ui| {
+                                    ui.frame(
+                                        Style::column()
+                                            .height(60.0)
+                                            .shrink(0.0)
+                                            .overflow_y(Overflow::Auto),
+                                        |ui| {
+                                            ui.add(Frame::canvas(
+                                                |_, input| [input.width(), 600.0],
+                                                |canvas| {
+                                                    nested_width.set(canvas.content_rect.width());
+                                                },
+                                            ));
+                                        },
+                                    );
+                                    ui.add(Frame::new().height(240.0).shrink(0.0));
+                                },
+                            );
+                        },
+                    )
+                    .drop_without_applying_deltas();
+            }
+            assert!(native_width.get() < 200.0);
+            assert_eq!(nested_width.get(), native_width.get());
         }
-        assert!(native_width.get() < 200.0);
-        assert_eq!(nested_width.get(), native_width.get());
     }
 
     #[test]
