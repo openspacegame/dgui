@@ -47,6 +47,55 @@ fn pointer(pos: egui::Pos2, pressed: bool) -> Vec<egui::Event> {
 }
 
 #[test]
+fn frame_clipping_preserves_native_controls_outside_the_tree() {
+    let ctx = context();
+    let mut gui = Dgui::new();
+    let clicks = Cell::new(0);
+    let position = egui::pos2(120.0, 20.0);
+
+    for events in [vec![], pointer(position, true), pointer(position, false)] {
+        let mut events = Some(events);
+        ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 300.0),
+                )),
+                events: events.take().unwrap(),
+                ..Default::default()
+            },
+            |host| {
+                gui.show_styled(
+                    host,
+                    Style::column()
+                        .width(60.0)
+                        .height(40.0)
+                        .overflow(Overflow::Clip),
+                    |ui| {
+                        ui.add(
+                            Frame::text("Clipped content")
+                                .width(180.0)
+                                .height(30.0)
+                                .shrink(0.0),
+                        );
+                    },
+                );
+                let response = host.put(
+                    Rect::from_min_size(egui::pos2(100.0, 5.0), egui::vec2(80.0, 30.0)),
+                    egui::Button::new("Outside"),
+                );
+                if response.clicked() {
+                    clicks.set(clicks.get() + 1);
+                }
+            },
+        )
+        .drop_without_applying_deltas();
+    }
+
+    assert_eq!(clicks.get(), 1);
+}
+
+#[test]
 fn fractional_intrinsic_extents_reach_canvas_without_logical_pixel_rounding() {
     for pixels_per_point in [1.0, 1.25, 2.0] {
         let ctx = context();
