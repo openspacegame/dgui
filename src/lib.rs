@@ -851,15 +851,20 @@ fn render<'a>(
             .push(Box::new(move || callback(combined)));
     }
     let profile_finish_ns = profile_finish.elapsed().as_nanos() as u64;
-    host.ctx().data_mut(|data| {
-        let totals = data.get_temp_mut_or_default::<[u64; 12]>(egui::Id::new("dgui-profile-node"));
-        let base = profile_kind * 4;
-        totals[base] += profile_setup_ns;
-        totals[base + 1] += profile_content_ns;
-        totals[base + 2] += profile_finish_ns;
-        totals[base + 3] += 1;
-    });
+    let mut totals = PROFILE_NODES.lock().unwrap();
+    let base = profile_kind * 4;
+    totals[base] += profile_setup_ns;
+    totals[base + 1] += profile_content_ns;
+    totals[base + 2] += profile_finish_ns;
+    totals[base + 3] += 1;
 
+}
+
+static PROFILE_NODES: std::sync::Mutex<[u64; 12]> = std::sync::Mutex::new([0; 12]);
+
+/// Drain temporary per-node timing probes for the game profiler.
+pub fn take_node_profile() -> [u64; 12] {
+    std::mem::take(&mut *PROFILE_NODES.lock().unwrap())
 }
 
 #[cfg(test)]
