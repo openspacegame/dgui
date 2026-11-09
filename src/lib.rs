@@ -742,12 +742,24 @@ fn render<'a>(
     if node.layout_only() {
         return;
     }
-    let mut ui = host.new_child(
-        egui::UiBuilder::new()
-            .id_salt(node.id)
-            .max_rect(content_rect)
-            .layout(egui::Layout::top_down(egui::Align::Min)),
-    );
+    // Text and decoration paint into explicit rectangles. Native canvases
+    // need their own layout cursor, as do frames changing the enabled state.
+    let mut child =
+        if matches!(&node.content, Content::Canvas(_)) || node.enabled != host.is_enabled() {
+            Some(
+                host.new_child(
+                    egui::UiBuilder::new()
+                        .id_salt(node.id)
+                        .max_rect(content_rect)
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                ),
+            )
+        } else {
+            None
+        };
+    let restore_clip = child.is_none();
+    let ui = child.as_mut().unwrap_or(host);
+    let previous_clip = ui.clip_rect();
     ui.set_clip_rect(parent_clip);
     if !node.enabled {
         ui.disable();
@@ -765,7 +777,7 @@ fn render<'a>(
             egui::WidgetInfo::labeled(egui::WidgetType::Other, node.enabled, label)
         });
     }
-    let native_previous = host.ctx().read_response(node.id);
+    let native_previous = ui.ctx().read_response(node.id);
     let hovered = response.hovered() || native_previous.as_ref().is_some_and(|r| r.hovered());
     let focused = response.has_focus() || native_previous.as_ref().is_some_and(|r| r.has_focus());
     let pressed = response.is_pointer_button_down_on()
@@ -798,10 +810,10 @@ fn render<'a>(
         response.widget_info(|| {
             egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), text.value())
         });
-        text.paint(&mut ui, content_rect, node.style.effective_overflow());
+        text.paint(ui, content_rect, node.style.effective_overflow());
     }
     let mut canvas_context = Canvas {
-        ui: &mut ui,
+        ui,
         id: node.id,
         frame_rect: rect,
         content_rect,
@@ -843,6 +855,9 @@ fn render<'a>(
         canvas_context
             .callbacks
             .push(Box::new(move || callback(combined)));
+    }
+    if restore_clip {
+        canvas_context.ui.set_clip_rect(previous_clip);
     }
 }
 
