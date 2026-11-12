@@ -1179,3 +1179,23 @@ fn text_geometry_tracks_content_styles_scale_and_replaced_fonts() {
     ctx.set_fonts(definitions);
     check(&mut gui, "alpha beta gamma delta");
 }
+
+#[test]
+fn response_observers_compose_on_disabled_controls() {
+    let ctx = context();
+    let mut gui = Dgui::new();
+    let calls = std::cell::RefCell::new(Vec::new());
+    run(&ctx, &mut gui, [400.0, 300.0], vec![], |ui| {
+        ui.add(
+            Frame::text("Waiting")
+                .enabled(false)
+                .on_response(|response| {
+                    assert!(!response.enabled());
+                    calls.borrow_mut().push(1);
+                })
+                .on_response(|_| calls.borrow_mut().push(2))
+                .on_response(|_| calls.borrow_mut().push(3)),
+        );
+    });
+    assert_eq!(*calls.borrow(), [1, 2, 3]);
+}

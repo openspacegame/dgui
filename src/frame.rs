@@ -248,8 +248,15 @@ impl<'a> Frame<'a> {
     ///
     /// Unlike the other event methods, this runs every frame, so it can read
     /// geometry, drags, held buttons, and anything else egui reports.
+    /// Multiple observers run in registration order, including on disabled frames.
     pub fn on_response(mut self, callback: impl FnOnce(egui::Response) + 'a) -> Self {
-        self.events.response = Some(Box::new(callback));
+        let previous = self.events.response.take();
+        self.events.response = Some(Box::new(move |response| {
+            if let Some(previous) = previous {
+                previous(response.clone());
+            }
+            callback(response);
+        }));
         self
     }
 }
