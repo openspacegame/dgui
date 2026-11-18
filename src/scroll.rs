@@ -47,6 +47,9 @@ fn scroll_area(
     use egui::scroll_area::{ScrollBarVisibility, ScrollSource};
     egui::ScrollArea::new(axes)
         .id_salt(id)
+        // Taffy has already allocated the scroll viewport on both axes.
+        .min_scrolled_width(0.0)
+        .min_scrolled_height(0.0)
         .auto_shrink([false, false])
         .scroll_offset(offset)
         .stick_to_right(follow_end[0])
@@ -375,6 +378,23 @@ mod tests {
             },
         );
         assert_eq!(gui.last_layout[0].1.height(), 91.0);
+    }
+
+    #[test]
+    fn small_scroll_viewport_preserves_its_allocated_size() {
+        let mut gui = Dgui::new();
+        run(&mut gui, Style::column().width(40.0), |ui| {
+            ui.frame(
+                Style::row().max_height(100.0).overflow(Overflow::Auto),
+                |ui| {
+                    ui.add(Frame::new().grow(1.0).min_height(28.0));
+                },
+            );
+        });
+
+        let viewport = gui.last_layout[1].1;
+        assert_eq!(viewport.size(), egui::vec2(40.0, 28.0));
+        assert_eq!(gui.last_layout[2].1, viewport);
     }
 
     #[test]
