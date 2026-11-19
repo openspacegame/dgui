@@ -108,8 +108,10 @@ impl<'a> VirtualList<'a> {
                 top = top.clamp(0.0, (offsets.last().unwrap() - viewport_height).max(0.0));
                 let mut scroll = egui::ScrollArea::vertical()
                     .id_salt(canvas.id.with("virtual-scroll"))
+                    .min_scrolled_width(0.0)
+                    .min_scrolled_height(0.0)
                     .auto_shrink([false, false]);
-                if changed || reveal.is_some() {
+                if changed || reveal.is_some() || top != memory.top {
                     scroll = scroll.vertical_scroll_offset(top);
                 }
                 let output = scroll.show_viewport(canvas.ui, |host, viewport| {
@@ -285,5 +287,51 @@ mod tests {
         assert_eq!(visible_rows(&offsets, 100_000.0, 100_300.0), 4998..5017);
         assert_eq!(visible_rows(&[0.0], 0.0, 300.0), 0..0);
         assert_eq!(visible_rows(&[0.0, 20.0], 100_000.0, 100_300.0), 0..1);
+    }
+
+    #[test]
+    fn small_virtual_viewport_preserves_allocated_height() {
+        let context = egui::Context::default();
+        context.options_mut(|options| options.max_passes = 1.try_into().unwrap());
+        let mut gui = Dgui::new();
+        let built = std::cell::Cell::new(0_usize);
+        let row_two_top = std::cell::Cell::new(None::<f32>);
+        context
+            .run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(200.0, 200.0),
+                    )),
+                    ..Default::default()
+                },
+                |host| {
+                    gui.show_styled(host, Style::column().width(40.0).height(30.0), |ui| {
+                        ui.add(
+                            VirtualList::uniform(
+                                20,
+                                20.0,
+                                |index| index,
+                                |ui, index| {
+                                    built.set(built.get() + 1);
+                                    let row_two_top = &row_two_top;
+                                    ui.add(Frame::new().height(20.0).shrink(0.0).on_response(
+                                        move |response| {
+                                            if index == 2 {
+                                                row_two_top.set(Some(response.rect.top()));
+                                            }
+                                        },
+                                    ));
+                                },
+                            )
+                            .reveal(2_usize)
+                            .frame(),
+                        );
+                    });
+                },
+            )
+            .drop_without_applying_deltas();
+        assert_eq!(built.get(), 5);
+        assert_eq!(row_two_top.get(), Some(10.0));
     }
 }
