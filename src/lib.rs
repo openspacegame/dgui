@@ -112,7 +112,106 @@ use std::{
 use taffy::{AvailableSpace as TaffyAvailableSpace, Size, TaffyTree};
 
 type Callback<'a> = Box<dyn FnOnce() + 'a>;
+type PortalHost<'a> = Box<dyn FnOnce(&egui::Context, Portal<'_, 'a>) + 'a>;
 type ScopePath = Vec<u64>;
+
+struct PortalNode<'a> {
+    id: egui::Id,
+    nodes: Vec<FrameNode<'a>>,
+    portals: Vec<PortalNode<'a>>,
+    host: PortalHost<'a>,
+}
+
+/// Draws a deferred portal subtree into an independent egui host, such as a
+/// floating window or modal.
+///
+/// Passed to the `host` closure of [`Ui::portal`]. Call [`show`](Self::show)
+/// inside the target egui host to lay out and paint the subtree; drop `Portal`
+/// without calling `show` to skip drawing, callbacks, and nested portals for
+/// this frame.
+pub struct Portal<'a, 'frame> {
+    id: egui::Id,
+    nodes: Vec<FrameNode<'frame>>,
+    portals: Vec<PortalNode<'frame>>,
+    caches: &'a mut HashMap<egui::Id, LayoutCache>,
+    drawn_portals: &'a mut HashSet<egui::Id>,
+    callbacks: &'a mut Vec<Callback<'frame>>,
+}
+
+impl Portal<'_, '_> {
+    /// Lays out and paints the portal subtree into `host`, collecting event
+    /// callbacks into the enclosing [`Dgui`] pass and invoking nested portals.
+    ///
+    /// # Panics
+    ///
+    /// If `host`'s available rectangle is infinite.
+    pub fn show(mut self, host: &mut egui::Ui) {
+        let root_rect = host.available_rect_before_wrap();
+        assert!(
+            root_rect.is_finite(),
+            "dgui requires a finite host rectangle"
+        );
+        if !host.is_enabled() {
+            for node in &mut self.nodes {
+                node.enabled = false;
+            }
+        }
+        self.drawn_portals.insert(self.id);
+        let cache = self.caches.entry(self.id).or_default();
+        let mut layout = TaffyTree::new();
+        layout.disable_rounding();
+        let mut ids = Vec::new();
+        let size = [root_rect.width(), root_rect.height()];
+        let layouts = compute_or_reuse_layout(
+            cache,
+            size,
+            &self.nodes,
+            host.ctx(),
+            &mut layout,
+            &mut ids,
+        );
+        let mut drawing = scroll::Drawing {
+            nodes: &mut self.nodes,
+            layouts,
+            layout: &mut layout,
+            ids: &mut ids,
+            reflows: &mut cache.reflows,
+            callbacks: self.callbacks,
+            #[cfg(test)]
+            rectangles: Vec::new(),
+        };
+        let painted_root = drawing.draw(host, 0, root_rect.min, host.clip_rect());
+        host.advance_cursor_after_rect(painted_root);
+        let ctx = host.ctx().clone();
+        draw_portals(
+            &ctx,
+            self.portals,
+            self.caches,
+            self.drawn_portals,
+            self.callbacks,
+        );
+    }
+}
+
+fn draw_portals<'frame>(
+    ctx: &egui::Context,
+    portals: Vec<PortalNode<'frame>>,
+    caches: &mut HashMap<egui::Id, LayoutCache>,
+    drawn_portals: &mut HashSet<egui::Id>,
+    callbacks: &mut Vec<Callback<'frame>>,
+) {
+    for portal in portals {
+        let handle = Portal {
+            id: portal.id,
+            nodes: portal.nodes,
+            portals: portal.portals,
+            caches,
+            drawn_portals,
+            callbacks,
+        };
+        (portal.host)(ctx, handle);
+    }
+}
 
 #[derive(Default)]
 enum Content<'a> {
@@ -158,6 +257,7 @@ impl FrameNode<'_> {
 struct Build<'a> {
     context: egui::Context,
     nodes: Vec<FrameNode<'a>>,
+    portals: Vec<PortalNode<'a>>,
     visited: HashSet<ScopePath>,
     state_keys: HashSet<(u64, u64)>,
     ordinals: HashMap<ScopePath, u64>,
@@ -225,6 +325,61 @@ impl<'frame> Ui<'_, 'frame> {
                 parent,
             });
         }
+    }
+
+    /// Declares an independent subtree rendered into a caller-provided egui host
+    /// (such as a floating window or modal) without adding a layout child to the
+    /// enclosing frame.
+    ///
+    /// `children` runs immediately during build so it can borrow short-lived
+    /// locals such as [`StateRead`](crate::StateRead) guards. `host` runs after
+    /// the enclosing tree finishes drawing and before event callbacks run,
+    /// receiving a [`Portal`] that lays out and paints the subtree when
+    /// [`Portal::show`] is called.
+    pub fn portal(
+        &mut self,
+        style: Style,
+        host: impl FnOnce(&egui::Context, Portal<'_, 'frame>) + 'frame,
+        children: impl FnOnce(&mut Ui<'_, 'frame>),
+    ) {
+        let ordinal = self.build.ordinals.entry(self.path.clone()).or_default();
+        let id = egui::Id::new((self.runtime_id, self.scopes[&self.path].mount, *ordinal));
+        *ordinal += 1;
+
+        let root = FrameNode {
+            id: id.with("root"),
+            children: Vec::new(),
+            style,
+            follow_scroll_end: [false; 2],
+            content: Content::Empty,
+            events: Events::default(),
+            clickable: false,
+            focusable: false,
+            enabled: true,
+            sense: None,
+            accessibility_label: None,
+        };
+        let parent_nodes = std::mem::replace(&mut self.build.nodes, vec![root]);
+        let parent_portals = std::mem::take(&mut self.build.portals);
+
+        let mut child = Ui {
+            build: self.build,
+            scopes: self.scopes,
+            next_mount: self.next_mount,
+            runtime_id: self.runtime_id,
+            path: self.path.clone(),
+            parent: 0,
+        };
+        children(&mut child);
+
+        let portal_nodes = std::mem::replace(&mut self.build.nodes, parent_nodes);
+        let nested_portals = std::mem::replace(&mut self.build.portals, parent_portals);
+        self.build.portals.push(PortalNode {
+            id,
+            nodes: portal_nodes,
+            portals: nested_portals,
+            host: Box::new(host),
+        });
     }
 
     /// Builds `children` inside a keyed component scope. The scope adds no
@@ -344,6 +499,7 @@ pub struct Dgui {
     id: u64,
     next_mount: u64,
     layout_cache: LayoutCache,
+    portal_caches: HashMap<egui::Id, LayoutCache>,
     scopes: HashMap<ScopePath, Scope>,
     #[cfg(test)]
     last_layout: Vec<(egui::Id, Rect)>,
@@ -364,6 +520,7 @@ impl Default for Dgui {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             next_mount: 0,
             layout_cache: LayoutCache::default(),
+            portal_caches: HashMap::new(),
             scopes: HashMap::from([(Vec::new(), Scope::new(0))]),
             #[cfg(test)]
             last_layout: Vec::new(),
@@ -441,6 +598,7 @@ impl Dgui {
                 sense: None,
                 accessibility_label: None,
             }],
+            portals: Vec::new(),
             visited: HashSet::from([Vec::new()]),
             state_keys: HashSet::new(),
             ordinals: HashMap::new(),
@@ -463,45 +621,14 @@ impl Dgui {
         layout.disable_rounding();
         let mut ids = Vec::new();
         let size = [root_rect.width(), root_rect.height()];
-        let layouts = if let Some(layouts) = self.layout_cache.reuse(size, &tree.nodes, host.ctx())
-        {
-            layouts
-        } else {
-            ids = layout_nodes(&mut layout, &tree.nodes);
-            let mut measurements = Vec::new();
-            compute_layout(
-                &mut layout,
-                ids[0],
-                Size {
-                    width: TaffyAvailableSpace::Definite(size[0]),
-                    height: TaffyAvailableSpace::Definite(size[1]),
-                },
-                &tree.nodes,
-                host.ctx(),
-                Some(&mut measurements),
-            );
-            let layouts: Vec<_> = ids.iter().map(|&id| *layout.layout(id).unwrap()).collect();
-            self.layout_cache = LayoutCache {
-                size,
-                nodes: tree
-                    .nodes
-                    .iter()
-                    .map(|node| LayoutInput {
-                        style: node.style.clone(),
-                        children: node.children.clone(),
-                        text: match &node.content {
-                            Content::Text(text) => Some(text.clone()),
-                            _ => None,
-                        },
-                    })
-                    .collect(),
-                measurements,
-                layouts: layouts.clone(),
-                reflows: Vec::new(),
-                typography: Some(Typography::new(host.ctx())),
-            };
-            layouts
-        };
+        let layouts = compute_or_reuse_layout(
+            &mut self.layout_cache,
+            size,
+            &tree.nodes,
+            host.ctx(),
+            &mut layout,
+            &mut ids,
+        );
         let mut callbacks: Vec<Callback<'frame>> = Vec::new();
         let mut drawing = scroll::Drawing {
             nodes: &mut tree.nodes,
@@ -519,6 +646,15 @@ impl Dgui {
             self.last_layout = drawing.rectangles;
         }
         host.advance_cursor_after_rect(painted_root);
+        let mut drawn_portals = HashSet::new();
+        draw_portals(
+            host.ctx(),
+            tree.portals,
+            &mut self.portal_caches,
+            &mut drawn_portals,
+            &mut callbacks,
+        );
+        self.portal_caches.retain(|id, _| drawn_portals.contains(id));
         for callback in callbacks {
             callback();
         }
@@ -544,6 +680,52 @@ struct LayoutCache {
     layouts: Vec<taffy::Layout>,
     reflows: Vec<ScrollLayout>,
     typography: Option<Typography>,
+}
+
+fn compute_or_reuse_layout(
+    cache: &mut LayoutCache,
+    size: [f32; 2],
+    nodes: &[FrameNode<'_>],
+    context: &egui::Context,
+    layout: &mut TaffyTree<usize>,
+    ids: &mut Vec<taffy::NodeId>,
+) -> Vec<taffy::Layout> {
+    if let Some(layouts) = cache.reuse(size, nodes, context) {
+        return layouts;
+    }
+    *ids = layout_nodes(layout, nodes);
+    let mut measurements = Vec::new();
+    compute_layout(
+        layout,
+        ids[0],
+        Size {
+            width: TaffyAvailableSpace::Definite(size[0]),
+            height: TaffyAvailableSpace::Definite(size[1]),
+        },
+        nodes,
+        context,
+        Some(&mut measurements),
+    );
+    let layouts: Vec<_> = ids.iter().map(|&id| *layout.layout(id).unwrap()).collect();
+    *cache = LayoutCache {
+        size,
+        nodes: nodes
+            .iter()
+            .map(|node| LayoutInput {
+                style: node.style.clone(),
+                children: node.children.clone(),
+                text: match &node.content {
+                    Content::Text(text) => Some(text.clone()),
+                    _ => None,
+                },
+            })
+            .collect(),
+        measurements,
+        layouts: layouts.clone(),
+        reflows: Vec::new(),
+        typography: Some(Typography::new(context)),
+    };
+    layouts
 }
 
 impl LayoutCache {

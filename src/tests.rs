@@ -1199,3 +1199,150 @@ fn response_observers_compose_on_disabled_controls() {
     });
     assert_eq!(*calls.borrow(), [1, 2, 3]);
 }
+
+#[test]
+fn portal_does_not_affect_parent_layout_and_borrows_state_read() {
+    let ctx = context();
+    let mut gui = Dgui::new();
+    let button_rect = Cell::new(Rect::NOTHING);
+
+    for step in 0..5 {
+        let events = match step {
+            2 => pointer(button_rect.get().center(), true),
+            3 => pointer(button_rect.get().center(), false),
+            _ => vec![],
+        };
+        run(&ctx, &mut gui, [400.0, 300.0], events, |ui| {
+            let label = ui.state("label", || "before".to_owned());
+            let read = label.read();
+            let borrowed: &str = &read;
+            ui.frame(Style::column().gap(20.0), |ui| {
+                ui.add(Frame::new().height(30.0).shrink(0.0));
+                ui.portal(
+                    Style::column()
+                        .width(Length::Percent(1.0))
+                        .height(Length::Percent(1.0)),
+                    |ctx, portal| {
+                        egui::Area::new(egui::Id::new("test_portal"))
+                            .fixed_pos(egui::pos2(120.0, 40.0))
+                            .fade_in(false)
+                            .show(ctx, |host| {
+                                host.set_min_size(egui::vec2(160.0, 80.0));
+                                host.set_max_size(egui::vec2(160.0, 80.0));
+                                portal.show(host);
+                            });
+                    },
+                    |ui| {
+                        ui.add(
+                            Frame::text(borrowed)
+                                .height(40.0)
+                                .on_response(|r| button_rect.set(r.rect))
+                                .on_click(move || label.set("after".to_owned())),
+                        );
+                    },
+                );
+                ui.add(Frame::new().height(30.0).shrink(0.0));
+            });
+        });
+        // Two 30px items with one 20px gap: the portal adds no layout node or gap.
+        assert_eq!(gui.last_layout[2].1.top(), 0.0);
+        assert_eq!(gui.last_layout[3].1.top(), 50.0);
+    }
+
+    let final_value = Cell::new(String::new());
+    run(&ctx, &mut gui, [400.0, 300.0], vec![], |ui| {
+        let label = ui.state("label", || "unexpected".to_owned());
+        final_value.set(label.get());
+    });
+    assert_eq!(final_value.into_inner(), "after");
+}
+
+#[test]
+fn skipping_portal_show_suppresses_callbacks_and_nested_portals() {
+    let ctx = context();
+    let mut gui = Dgui::new();
+    let outer_clicked = Cell::new(false);
+    let nested_drawn = Cell::new(false);
+
+    for events in [
+        vec![],
+        pointer(egui::pos2(140.0, 60.0), true),
+        pointer(egui::pos2(140.0, 60.0), false),
+    ] {
+        run(&ctx, &mut gui, [400.0, 300.0], events, |ui| {
+            ui.portal(
+                Style::column(),
+                |_ctx, _portal| {
+                    // Intentionally drop without calling `portal.show(...)`.
+                },
+                |ui| {
+                    ui.add(
+                        Frame::new()
+                            .width(200.0)
+                            .height(200.0)
+                            .on_click(|| outer_clicked.set(true)),
+                    );
+                    ui.portal(
+                        Style::column(),
+                        |_ctx, _portal| nested_drawn.set(true),
+                        |ui| {
+                            ui.add(Frame::text("Nested"));
+                        },
+                    );
+                },
+            );
+        });
+    }
+
+    assert!(!outer_clicked.get());
+    assert!(!nested_drawn.get());
+}
+
+#[test]
+fn unmounting_portal_scope_cancels_tasks_and_drops_state() {
+    let ctx = context();
+    let mut gui = Dgui::new();
+    let dropped = Arc::new(AtomicUsize::new(0));
+    struct DropCounter(Arc<AtomicUsize>);
+    impl Drop for DropCounter {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let mount = |gui: &mut Dgui, open: bool| {
+        let dropped = dropped.clone();
+        run(&ctx, gui, [400.0, 300.0], vec![], |ui| {
+            if open {
+                ui.portal(
+                    Style::column(),
+                    |ctx, portal| {
+                        egui::Area::new(egui::Id::new("scoped_portal"))
+                            .fixed_pos(egui::pos2(50.0, 50.0))
+                            .show(ctx, |host| {
+                                host.set_min_size(egui::vec2(100.0, 60.0));
+                                host.set_max_size(egui::vec2(100.0, 60.0));
+                                portal.show(host);
+                            });
+                    },
+                    |ui| {
+                        ui.scope("modal", |ui| {
+                            let _guard = ui.state("guard", || DropCounter(dropped.clone()));
+                            let task_drop = DropCounter(dropped.clone());
+                            ui.tasks().spawn_once("pending", move || async move {
+                                let _keep = task_drop;
+                                std::future::pending::<()>().await;
+                            });
+                            ui.add(Frame::text("Open"));
+                        });
+                    },
+                );
+            }
+        });
+    };
+
+    mount(&mut gui, true);
+    assert_eq!(dropped.load(Ordering::SeqCst), 0);
+    mount(&mut gui, false);
+    assert_eq!(dropped.load(Ordering::SeqCst), 2);
+}
